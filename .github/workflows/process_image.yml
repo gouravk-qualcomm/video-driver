@@ -1,3 +1,4 @@
+
 name: _process_image
 
 on:
@@ -21,10 +22,13 @@ jobs:
     steps:
       - name: Build docker image
         id: docker_build
-        uses: qualcomm-linux/video-driver/.github/actions/build_docker_image@fix-mounting
+        uses: qualcomm-linux/video-driver/.github/actions/build_docker_image@fix-mounting-3
+
+      - name: checkout
+        uses: actions/checkout@v5
 
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@fix-mounting
+        uses: ./.github/actions/sync
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -32,14 +36,14 @@ jobs:
           base_ref: ${{ github.ref_name }}
 
       - name: Download Build from S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting-3
         with:
           mode: download
           s3_bucket: qli-prd-video-gh-artifacts
-          download_file: "${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.build_matrix.machine }}/${{ matrix.build_matrix.machine }}_qcomflash.tar.gz"
+          download_file: "${{ github.repository_owner }}/${{ github.event.repository.name }}/18270616027-1/${{ matrix.build_matrix.machine }}/${{ matrix.build_matrix.machine }}_qcomflash.tar.gz"
 
       - name: Download testApp from S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting-3
         with:
           mode: download
           s3_bucket: qli-prd-video-gh-artifacts
@@ -52,6 +56,7 @@ jobs:
           tar -xvf "${{ matrix.build_matrix.machine }}_qcomflash.tar.gz" -C build/
           echo "Artifacts Extracted successfully!"
           ls -l build/
+
       - name: Unpack the testApp
         run: |
           mkdir testApp
@@ -60,6 +65,20 @@ jobs:
           echo "testApp Extracted Successfully!"
           ls -l testApp/
           ls -l testApp/build/
+
+      - name: Download all artifacts from S3
+        shell: bash
+        run: |
+          mkdir -p ${{ github.workspace }}/downloads
+          echo "📥 Syncing files from S3 path: s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/"
+          aws s3 sync s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/ ${{ github.workspace }}/downloads
+          echo "✅ Download complete."
+
+      - name: Print downloaded files
+        run: |
+          echo "📦 Files downloaded from S3:"
+          ls -lh ${{ github.workspace }}/downloads
+
       - name: Inject Iris test app to rootfs
         run: |
           ls -l
@@ -72,6 +91,7 @@ jobs:
             ${{ steps.docker_build.outputs.image_name }} \
             bash -c "
               set -eux
+
               cd build
               ls -l
               mkdir -p /tmp/rootfs
@@ -80,13 +100,17 @@ jobs:
   
               sudo mkdir -p /tmp/rootfs/data/vendor/iris_test_app/input
               sudo mkdir -p /tmp/rootfs/data/vendor/iris_test_app/output
+              sudo mkdir -p /tmp/rootfs/data/vendor/iris_test_app/firmware
 
               sudo cp /workspace/testApp/build/iris_v4l2_test /tmp/rootfs/data/vendor/iris_test_app/
               sudo chmod +x /tmp/rootfs/data/vendor/iris_test_app/iris_v4l2_test
+              sudo cp /workspace/downloads/vpu20_1v.mbn /tmp/rootfs/data/vendor/iris_test_app/firmware
+              sudo chmod +x /tmp/rootfs/data/vendor/iris_test_app/firmware/vpu20_1v.mbn
               sync
 
               sudo umount /tmp/rootfs
             "
+
       - name: Pack build with TestApp and prepare for Upload
         run: |
           ls -l build/
@@ -96,7 +120,7 @@ jobs:
           echo "${{ github.workspace }}/${{ matrix.build_matrix.machine }}_qcomflash_payload.tar.gz" >> "${{ github.workspace }}/artifacts/file_list.txt"
 
       - name: Upload Build to S3
-        uses: ./.github/actions/aws_s3_helper
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting-3
         with:
           mode: multi-upload
           s3_bucket: qli-prd-video-gh-artifacts
@@ -107,3 +131,4 @@ jobs:
       - name: Cleanup
         run: |
           rm -rf ${{ github.workspace }}/* || true
+

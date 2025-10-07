@@ -1,3 +1,4 @@
+
 ---
 name: _loading
 description: Load required parameters for the subsequent jobs
@@ -15,8 +16,11 @@ jobs:
     outputs:
       build_matrix: ${{ steps.loading.outputs.build_matrix }}
     steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@fix-mounting
+        uses: qualcomm-linux/video-driver/.github/actions/sync@fix-mounting-3
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -25,4 +29,4 @@ jobs:
 
       - name: Load Parameters
         id: loading
-        uses: qualcomm-linux/video-driver/.github/actions/loading@fix-mounting
+        uses: qualcomm-linux/video-driver/.github/actions/loading@fix-mounting-3
