@@ -23,7 +23,8 @@ inputs:
     default: single-upload
   upload_location:
     description: Upload location
-    required: true
+    required: false
+    default: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}
 
 outputs:
   presigned_url:
@@ -31,7 +32,7 @@ outputs:
     value: ${{ steps.sync-data.outputs.presigned_url }}
   s3_location:
     description: Upload location
-    value: ${{ inputs.upload_location }}
+    value: ${{ steps.sync-data.outputs.s3_location }}
 
 runs:
   using: "composite"
@@ -61,8 +62,8 @@ runs:
               if [ -f "$resolved_file" ]; then
                 filename=$(basename "$resolved_file")
                 echo "📤 Uploading $filename..."
-                aws s3 cp "$resolved_file" s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/"$filename"
-                presigned_url=$(aws s3 presign s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/"$filename" --expires-in 259200)
+                aws s3 cp "$resolved_file" s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/${{ env.machine }}/"$filename"
+                presigned_url=$(aws s3 presign s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/${{ env.machine }}/"$filename" --expires-in 259200)
 
                 if [ "$first_line" = true ]; then
                   first_line=false
@@ -82,8 +83,8 @@ runs:
           single-upload)
             resolved_file=$(readlink -f "${{ inputs.local_file }}")
             filename=$(basename "$resolved_file")
-            aws s3 cp "$resolved_file" s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/"$filename"
-            presigned_url=$(aws s3 presign s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/"$filename" --expires-in 259200)
+            aws s3 cp "$resolved_file" s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/${{ env.machine }}/"$filename"
+            presigned_url=$(aws s3 presign s3://${{ inputs.s3_bucket }}/${{ env.UPLOAD_LOCATION }}/${{ env.machine }}/"$filename" --expires-in 259200)
             echo "presigned_url=${presigned_url}" >> "$GITHUB_OUTPUT"
             ;;
           download)
@@ -96,6 +97,8 @@ runs:
             ;;
         esac
         echo "::endgroup::"
+        upload_loc="${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/${{ env.machine }}"
+        echo "s3_location=$upload_loc" >> "$GITHUB_OUTPUT"
 
     - name: Upload presigned URL manifest
       if: ${{ inputs.mode == 'multi-upload' }}

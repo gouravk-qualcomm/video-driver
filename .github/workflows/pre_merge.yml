@@ -19,4 +19,9 @@ jobs:
     secrets: inherit
     with:
       build_matrix: ${{ needs.loading.outputs.build_matrix }}
-      docker_image: video-image:ver.1.0
+
+  process_image:
+    needs: [loading, build]
+    uses: qualcomm-linux/video-driver/.github/workflows/process_image.yml@video.qclinux.0.0
+    with:
+      build_matrix: ${{ needs.loading.outputs.build_matrix }}
