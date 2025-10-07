@@ -21,10 +21,10 @@ jobs:
     steps:
       - name: Build docker image
         id: docker_build
-        uses: qualcomm-linux/video-driver/.github/actions/build_docker_image@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/build_docker_image@fix-mounting
 
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/sync@fix-mounting
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -32,14 +32,14 @@ jobs:
           base_ref: ${{ github.ref_name }}
 
       - name: Download Build from S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting
         with:
           mode: download
           s3_bucket: qli-prd-video-gh-artifacts
           download_file: "${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.build_matrix.machine }}/${{ matrix.build_matrix.machine }}_qcomflash.tar.gz"
 
       - name: Download testApp from S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting
         with:
           mode: download
           s3_bucket: qli-prd-video-gh-artifacts

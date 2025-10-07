@@ -21,10 +21,10 @@ jobs:
     steps:
       - name: Build docker image
         id: docker_build
-        uses: qualcomm-linux/video-driver/.github/actions/build_docker_image@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/build_docker_image@fix-mounting
 
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/sync@fix-mounting
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -32,7 +32,7 @@ jobs:
           base_ref: ${{ github.ref_name }}
 
       - name: Build ${{ matrix.build_matrix.machine }}
-        uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/build@fix-mounting
         with:
           docker_image: ${{ steps.docker_build.outputs.image_name }}
           kas_file: ${{ matrix.build_matrix.kas_file }}
@@ -78,7 +78,7 @@ jobs:
           echo "✅ Tarball created: $tarball"
 
       - name: Generate Iris test app
-        uses: qualcomm-linux/video-driver/.github/actions/generate_iris_test_app@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/generate_iris_test_app@fix-mounting
         with:
           docker_image: ${{ steps.docker_build.outputs.image_name }}
 
@@ -91,7 +91,7 @@ jobs:
 
       - name: Upload build artifacts to S3
         id: upload-artifacts
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting
         with:
           s3_bucket: qli-prd-video-gh-artifacts
           local_file: ${{ github.workspace }}/${{ matrix.build_matrix.machine }}_qcomflash.tar.gz
@@ -100,7 +100,7 @@ jobs:
           machine: "${{ matrix.build_matrix.machine }}"
 
       - name: Upload testApp to S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@fix-mounting
         with:
           s3_bucket: qli-prd-video-gh-artifacts
           local_file: ${{ github.workspace }}/v4l-video-test-app/${{ matrix.build_matrix.machine }}_irisTestApp.tar.gz

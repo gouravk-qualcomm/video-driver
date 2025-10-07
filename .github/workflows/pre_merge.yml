@@ -6,22 +6,22 @@ on:
   pull_request_target: # requiring access to base repo
     types: [opened, synchronize, reopened]
     branches:
-      - video.qclinux.0.0
+      - fix-mounting
 
 jobs:
   loading:
-    uses: qualcomm-linux/video-driver/.github/workflows/loading.yml@video.qclinux.0.0
+    uses: qualcomm-linux/video-driver/.github/workflows/loading.yml@fix-mounting
     secrets: inherit
 
   build:
     needs: loading
-    uses: qualcomm-linux/video-driver/.github/workflows/build.yml@video.qclinux.0.0
+    uses: qualcomm-linux/video-driver/.github/workflows/build.yml@fix-mounting
     secrets: inherit
     with:
       build_matrix: ${{ needs.loading.outputs.build_matrix }}
 
   process_image:
     needs: [loading, build]
-    uses: qualcomm-linux/video-driver/.github/workflows/process_image.yml@video.qclinux.0.0
+    uses: qualcomm-linux/video-driver/.github/workflows/process_image.yml@fix-mounting
     with:
       build_matrix: ${{ needs.loading.outputs.build_matrix }}
