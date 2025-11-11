@@ -21,7 +21,7 @@ jobs:
   sync-and-build:
     runs-on: 
       group: GHA-video-Prd-SelfHosted-RG
-      labels: [self-hosted, video-prd-u2204-x64-large-od-ephem]
+      labels: [self-hosted, video-prd-u2404-x64-large-od-ephem]
 
     steps:
       - name: Pull Docker image
@@ -30,7 +30,7 @@ jobs:
           image: ${{ inputs.docker_image }}
       
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/sync@new_mount
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -39,13 +39,13 @@ jobs:
           caller_workflow: build
 
       - name: Build workspace
-        uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/build@new_mount
         with:
           docker_image: kmake-image:ver.1.0
           workspace_path: ${{ github.workspace }}
 
       - name: Generate Iris test app
-        uses: qualcomm-linux/video-driver/.github/actions/generate_iris_test_app@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/generate_iris_test_app@new_mount
         with:
           docker_image: kmake-image:ver.1.0
         
@@ -233,7 +233,7 @@ jobs:
           cat "$file_list"
           
       - name: Upload all artifacts to S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@new_mount
         with:
           s3_bucket: qli-prd-video-gh-artifacts
           local_file: ${{ github.workspace }}/artifacts/file_list.txt
