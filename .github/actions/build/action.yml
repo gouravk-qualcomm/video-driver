@@ -10,18 +10,6 @@ inputs:
     description: Path to workspace directory
     required: true
 
-name: Build Workspace
-description: |
-  Builds kernel and video-driver using a Docker image.
-
-inputs:
-  docker_image:
-    description: Docker image to use
-    required: true
-  workspace_path:
-    description: Path to workspace directory
-    required: true
-
 runs:
   using: "composite"
   steps:
