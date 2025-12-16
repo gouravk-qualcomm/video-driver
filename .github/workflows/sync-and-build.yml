@@ -215,7 +215,7 @@ jobs:
           echo "$MERGED_PATH" >> "$file_list"
           echo "✅ Queued for upload: $MERGED_PATH"
 
-          # Loop through all machines from the build_matrix input and add DTBs
+          # Loop through all machines from the build_matrix inputs and add DTBs
           machines='${{ inputs.build_matrix }}'
           for machine in $(echo "$machines" | jq -r '.[].machine'); do
             dtb="$workspace/kobj/arch/arm64/boot/dts/qcom/${machine}.dtb"
@@ -279,4 +279,5 @@ jobs:
               done < "$file_list"
             fi
             echo "</details>"
+
           } >> "$GITHUB_STEP_SUMMARY"    
