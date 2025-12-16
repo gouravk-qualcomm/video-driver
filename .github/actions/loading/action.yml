@@ -42,4 +42,22 @@ runs:
           const full_matrix = Object.values(targets).map(({ machine, firmware, lavaname }) => ({ machine, firmware, lavaname }));
           core.setOutput('full_matrix', JSON.stringify(full_matrix));
           console.log("Full Matrix:", full_matrix);
+          
+- name: Show event info
+  run: |
+    echo "event_name=${{ github.event_name }}"
+    echo "PR head repo = ${{ github.event.pull_request.head.repo.full_name }}"
+    echo "PR base repo = ${{ github.event.pull_request.base.repo.full_name }}"
 
+- name: List workspace
+  run: |
+    pwd
+    ls -R
+
+- name: Show MACHINES.json presence
+  run: |
+    if [ -f ci/MACHINES.json ]; then
+      echo "MACHINES.json found"
+    else
+      echo "MACHINES.json missing"
+    fi
