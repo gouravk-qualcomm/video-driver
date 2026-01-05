@@ -1,17 +1,13 @@
-name: pre_merge
+name: post_merge_daily
 description: |
-  Orchestrates pre-merge CI for the video-driver repository a matrix
-  in the caller workflow. Builds and tests using reusable workflows.
+  Runs post-merge CI for the video-driver repository on a daily schedule.
+  Reuses loading, build and test workflows.
 
 on:
-  push:
-    branches:
-      - video.linux
+  schedule:
+    # Every day at 01:00 UTC
+    - cron: "0 1 * * *"
   workflow_dispatch:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-    branches:
-      - video.linux
 
 jobs:
   loading:

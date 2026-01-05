@@ -72,7 +72,7 @@ jobs:
 
       - name: Create lava job definition
         id: create_job_definition
-        uses: qualcomm-linux/video-driver/.github/actions/lava_job_render@video.qclinux.0.0
+        uses: qualcomm-linux/video-driver/.github/actions/lava_job_render@video.linux
         with:
           docker_image: ${{ inputs.docker_image }}
         env:
