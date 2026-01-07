@@ -80,7 +80,7 @@ jobs:
           set -euo pipefail
           data_dir="${{ github.workspace }}/kobj/tar-install/data/vendor/iris_test_app"
           mkdir -p "$data_dir"
-          data_dir2="${{ github.workspace }}/kobj/tar-install/data/vendor/firmware/iris_test_app"
+          data_dir2="${{ github.workspace }}/kobj/tar-install/data/vendor/iris_test_app/firmware"
           mkdir -p "$data_dir2"
           firmware_version=$(ls kobj/tar-install/lib/modules/)
           mkdir -p "kobj/tar-install/lib/modules/$firmware_version/updates"
