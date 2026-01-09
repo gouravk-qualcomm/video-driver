@@ -79,9 +79,12 @@ jobs:
         run: |
           set -euo pipefail
           data_dir="${{ github.workspace }}/kobj/tar-install/data/vendor/iris_test_app"
+          data_dir2="${{ github.workspace }}/kobj/tar-install/data/vendor/iris_test_app/firmware"
           mkdir -p "$data_dir"
+          mkdir -p "$data_dir2"
           cp "v4l-video-test-app/build/iris_v4l2_test" "$data_dir/"
-          cp "${{ github.workspace }}/downloads/vpu20_1v.mbn" "$data_dir/"
+          cp "${{ github.workspace }}/downloads/vpu20_1v.mbn" "$data_dir2/"
+
           cp "${{ github.workspace }}/downloads/video_clips_iris.tar.gz" "$data_dir/"
           echo "📂 Contents of $data_dir:"
           ls -lh "$data_dir"
@@ -127,7 +130,7 @@ jobs:
           mv local-kernel-ramdisk.cpio.gz local-kernel-ramdisk.cpio.gz.bak
           gunzip -c local-kernel-ramdisk.cpio.gz.bak > local-kernel-ramdisk.cpio
 
-          # Copy kerneltest from downloads
+          # Copy kerneltest from download
           cp "$workspace/downloads/kerneltest.cpio" .
 
           # Merge kerneltest and local-kernel-ramdisk
@@ -279,4 +282,5 @@ jobs:
               done < "$file_list"
             fi
             echo "</details>"
+
           } >> "$GITHUB_STEP_SUMMARY"    
