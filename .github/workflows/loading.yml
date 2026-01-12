@@ -20,7 +20,7 @@ jobs:
       full_matrix: ${{ steps.loading.outputs.full_matrix }}
     steps:
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.upstream(stage)
+        uses: qualcomm-linux/video-driver/.github/actions/sync@video.upstream
         with:
           event_name: ${{ github.event_name }}
           # For pull_request: github.head_ref is the source branch of the PR
@@ -34,4 +34,4 @@ jobs:
 
       - name: Load Parameters
         id: loading
-        uses: qualcomm-linux/video-driver/.github/actions/loading@video.upstream(stage)
+        uses: qualcomm-linux/video-driver/.github/actions/loading@video.upstream

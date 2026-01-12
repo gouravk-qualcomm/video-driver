@@ -6,21 +6,21 @@ description: |
 on:
   push:
     branches:
-      - 'video.upstream(stage)'
+      - 'video.upstream'
   workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened]
     branches:
-      - 'video.upstream(stage)'
+      - 'video.upstream'
 
 jobs:
   loading:
-    uses: qualcomm-linux/video-driver/.github/workflows/loading.yml@video.upstream(stage)
+    uses: qualcomm-linux/video-driver/.github/workflows/loading.yml@video.upstream
     secrets: inherit
 
   build:
     needs: loading
-    uses: qualcomm-linux/video-driver/.github/workflows/sync-and-build.yml@video.upstream(stage)
+    uses: qualcomm-linux/video-driver/.github/workflows/sync-and-build.yml@video.upstream
     secrets: inherit
     with:
       docker_image: kmake-image:ver.1.0
@@ -28,7 +28,7 @@ jobs:
 
   lava-test:
     needs: [loading, build]
-    uses: qualcomm-linux/video-driver/.github/workflows/test.yml@video.upstream(stage)
+    uses: qualcomm-linux/video-driver/.github/workflows/test.yml@video.upstream
     secrets: inherit
     with:
       docker_image: kmake-image:ver.1.0
