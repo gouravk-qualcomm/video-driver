@@ -32,8 +32,8 @@ runs:
             ls -al drivers/media/platform/qcom/
 
             echo 'Copying iris and venus from video-driver workspace...'
-            cp -r ../video-driver/iris drivers/media/platform/qcom/
-            cp -r ../video-driver/venus drivers/media/platform/qcom/
+            cp -r ../video-driver/driver/media/platform/qcom/iris  drivers/media/platform/qcom/
+            cp -r ../video-driver/drivers/media/platform/qcom/venus drivers/media/platform/qcom/
 
             echo 'Listing qcom drivers directory after copy...'
             ls -al drivers/media/platform/qcom/
