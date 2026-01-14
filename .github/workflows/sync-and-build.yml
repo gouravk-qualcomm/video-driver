@@ -30,7 +30,7 @@ jobs:
           image: ${{ inputs.docker_image }}
       
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.upstream
+        uses: qualcomm-linux/video-driver/.github/actions/sync@video.upstream(stage)
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -39,7 +39,7 @@ jobs:
           caller_workflow: build
 
       - name: Build workspace
-        uses: qualcomm-linux/video-driver/.github/actions/build@video.upstream
+        uses: qualcomm-linux/video-driver/.github/actions/build@video.upstream(stage)
         with:
           docker_image: kmake-image:ver.1.0
           workspace_path: ${{ github.workspace }}
@@ -74,6 +74,51 @@ jobs:
                -O "${{ github.workspace }}/downloads/video_clips_iris.tar.gz"
           [ -f "${{ github.workspace }}/downloads/video_clips_iris.tar.gz" ] || { echo "❌ Failed to download video_clips_iris.tar.gz"; exit 1; }
 
+      - name: Download v4l2 artifacts from S3
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/downloads/v4l2"
+          echo "📥 Syncing v4l2 files from S3..."
+          aws s3 sync "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/v4l2/" "${{ github.workspace }}/downloads/v4l2/"
+          echo "✅ v4l2 download complete"
+
+      - name: copying v4l2 artifacts to staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Define staging root (where the ramdisk is built)
+          INSTALL_ROOT="${{ github.workspace }}/kobj/tar-install/usr"
+          SRC="${{ github.workspace }}/downloads/v4l2"
+
+          # Create destination directories
+          mkdir -p "$INSTALL_ROOT/bin"
+          mkdir -p "$INSTALL_ROOT/lib"
+          mkdir -p "$INSTALL_ROOT/include"
+
+          echo "🔧 Copying v4l2 artifacts to $INSTALL_ROOT..."
+
+          # Copy contents if source exists
+          if [ -d "$SRC/bin" ]; then
+            cp -av "$SRC/bin/." "$INSTALL_ROOT/bin/"
+          else
+            echo "⚠️ Warning: $SRC/bin not found"
+          fi
+
+          if [ -d "$SRC/lib" ]; then
+            cp -av "$SRC/lib/." "$INSTALL_ROOT/lib/"
+          else
+            echo "⚠️ Warning: $SRC/lib not found"
+          fi
+
+          if [ -d "$SRC/include" ]; then
+            cp -av "$SRC/include/." "$INSTALL_ROOT/include/"
+          else
+             echo "⚠️ Warning: $SRC/include not found"
+          fi
+          
+          ls -R "$INSTALL_ROOT"
+
       - name: Prepare /data/vendor/iris_test_app and list contents
         shell: bash
         run: |
@@ -93,8 +138,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd "${{ github.workspace }}/kobj/tar-install"
-          find lib/modules data | cpio -o -H newc --owner=0:0 | gzip -9 > "${{ github.workspace }}/local-kernel-ramdisk.cpio.gz"
+          cd "${{ github.workspace }}/kobj/tar-install"    
+          # MODIFIED: Added 'usr' to the list of directories to package
+          find lib/modules data usr | cpio -o -H newc --owner=0:0 | gzip -9 > "${{ github.workspace }}/local-kernel-ramdisk.cpio.gz"
           cd - > /dev/null
           ls -lh "${{ github.workspace }}/local-kernel-ramdisk.cpio.gz"
     
@@ -235,7 +281,7 @@ jobs:
           cat "$file_list"
           
       - name: Upload all artifacts to S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.upstream
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.upstream(stage)
         with:
           s3_bucket: qli-prd-video-gh-artifacts
           local_file: ${{ github.workspace }}/artifacts/file_list.txt
