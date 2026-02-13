@@ -83,6 +83,17 @@ jobs:
           aws s3 sync "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/v4l2/" "${{ github.workspace }}/downloads/v4l2/"
           echo "✅ v4l2 download complete"
 
+      # --- NEW STEP ADDED HERE ---
+      - name: Download v4l2_clips from S3
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/downloads/v4l2_clips"
+          echo "📥 Syncing v4l2_clips from s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/v4l2_clips/"
+          aws s3 sync "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/v4l2_clips/" "${{ github.workspace }}/downloads/v4l2_clips/"
+          echo "✅ v4l2_clips Download complete"
+      # ---------------------------
+
       - name: copying v4l2 artifacts to staging
         shell: bash
         run: |
@@ -125,14 +136,26 @@ jobs:
           set -euo pipefail
           data_dir="${{ github.workspace }}/kobj/tar-install/data/vendor/iris_test_app"
           data_dir2="${{ github.workspace }}/kobj/tar-install/data/vendor/iris_test_app/firmware"
+          
+          # --- NEW DIRECTORY ---
+          data_dir3="${{ github.workspace }}/kobj/tar-install/data/vendor/iris_test_app/v4l2_clips"
+          # ---------------------
+
           mkdir -p "$data_dir"
           mkdir -p "$data_dir2"
+          mkdir -p "$data_dir3"
+
           cp "v4l-video-test-app/build/iris_v4l2_test" "$data_dir/"
           cp "${{ github.workspace }}/downloads/vpu20_1v.mbn" "$data_dir2/"
-
           cp "${{ github.workspace }}/downloads/video_clips_iris.tar.gz" "$data_dir/"
+
+          # --- COPY NEW CLIPS ---
+          echo "Copying v4l2_clips to ramdisk location..."
+          cp -r "${{ github.workspace }}/downloads/v4l2_clips/." "$data_dir3/"
+          # ----------------------
+
           echo "📂 Contents of $data_dir:"
-          ls -lh "$data_dir"
+          ls -lhR "$data_dir"
 
       - name: Create compressed kernel ramdisk archives
         shell: bash
@@ -140,6 +163,7 @@ jobs:
           set -euo pipefail
           cd "${{ github.workspace }}/kobj/tar-install"    
           # MODIFIED: Added 'usr' to the list of directories to package
+          # NOTE: 'data' folder now includes v4l2_clips
           find lib/modules data usr | cpio -o -H newc --owner=0:0 | gzip -9 > "${{ github.workspace }}/local-kernel-ramdisk.cpio.gz"
           cd - > /dev/null
           ls -lh "${{ github.workspace }}/local-kernel-ramdisk.cpio.gz"
@@ -329,4 +353,4 @@ jobs:
             fi
             echo "</details>"
 
-          } >> "$GITHUB_STEP_SUMMARY"    
+          } >> "$GITHUB_STEP_SUMMARY"
