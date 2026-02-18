@@ -60,15 +60,25 @@ jobs:
             const fullMatrix = JSON.parse(`${{ inputs.full_matrix }}`);
             const currentMachine = `${{ matrix.build_matrix.machine }}`;
 
+            // Find the entry in the matrix
             const entry = fullMatrix.find(item => item.machine === currentMachine);
+            
             if (!entry) {
               core.setFailed(`No entry found in full matrix for machine: ${currentMachine}`);
               return;
             }
 
             const lavaname = entry.lavaname;
+            // NEW: Check if a specific device hostname is requested
+            const specific_device = entry.specific_device || ""; 
+
             console.log(`Lavaname for ${currentMachine} is ${lavaname}`);
+            if (specific_device) {
+               console.log(`Requesting specific device: ${specific_device}`);
+            }
+
             core.setOutput("LAVANAME", lavaname);
+            core.setOutput("SPECIFIC_DEVICE", specific_device);
 
       - name: Create lava job definition
         id: create_job_definition
@@ -79,6 +89,8 @@ jobs:
           FIRMWARE: ${{ matrix.build_matrix.firmware }}
           MACHINE: ${{ matrix.build_matrix.machine }}
           LAVA_NAME: ${{ steps.get_lavaname.outputs.LAVANAME }}
+          # NEW: Pass the specific device to the render script
+          LAVA_DEVICE: ${{ steps.get_lavaname.outputs.SPECIFIC_DEVICE }}
 
       - name: Submit lava job
         id: submit_job
@@ -195,5 +207,3 @@ jobs:
           </details>
           '
           echo -e "$SUMMARY" >> $GITHUB_STEP_SUMMARY
-          # JOB_INFO="- [Job $job_id on ${{ matrix.build_matrix.machine }}]($job_url)"
-          # echo -e "$JOB_INFO" > job_info.md
