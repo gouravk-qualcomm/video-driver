@@ -1,0 +1,53 @@
+name: Build Workspace
+description: |
+  Builds kernel and video-driver using a Docker image.
+
+inputs:
+  docker_image:
+    description: Docker image to use
+    required: true
+  workspace_path:
+    description: Path to workspace directory
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build kernel
+      shell: bash
+      env:
+        DOCKER_IMAGE: ${{ inputs.docker_image }}
+        WORKSPACE_PATH: ${{ inputs.workspace_path }}
+      run: |
+        set -euo pipefail
+
+        docker run --rm \
+          -v "$WORKSPACE_PATH:$WORKSPACE_PATH" \
+          -w "$WORKSPACE_PATH/kernel" \
+          --user "$(id -u):$(id -g)" \
+          "$DOCKER_IMAGE" \
+          bash -c '
+            make O=../kobj ARCH=arm64 defconfig &&
+            make O=../kobj -j$(nproc) &&
+            make O=../kobj -j$(nproc) dir-pkg INSTALL_MOD_STRIP=1
+          '
+
+    - name: Build video-driver
+      shell: bash
+      env:
+        DOCKER_IMAGE: ${{ inputs.docker_image }}
+        WORKSPACE_PATH: ${{ inputs.workspace_path }}
+      run: |
+        set -euo pipefail
+
+        docker run --rm \
+          -v "$WORKSPACE_PATH:$WORKSPACE_PATH" \
+          -w "$WORKSPACE_PATH/video-driver" \
+          --user "$(id -u):$(id -g)" \
+          -e WORKSPACE_PATH="$WORKSPACE_PATH" \
+          "$DOCKER_IMAGE" \
+          bash -c '
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=aarch64-linux-gnu-gcc-13 \
+              -C "$WORKSPACE_PATH/kobj" \
+              M="$(pwd)" VIDEO_KERNEL_ROOT="$(pwd)" modules
+          '
