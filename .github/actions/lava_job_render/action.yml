@@ -11,6 +11,8 @@ runs:
     - name: Process presigned_urls.json
       id: process_urls
       uses: actions/github-script@v7
+      env:
+        MACHINE: ${{ env.MACHINE }}
       with:
         script: |
           const fs = require('fs');
@@ -19,6 +21,7 @@ runs:
           const filePath = p.join(process.env.GITHUB_WORKSPACE, 'presigned_urls.json');
           if (!fs.existsSync(filePath)) {
             core.setFailed(`File not found: ${filePath}`);
+            return;
           }
 
           // Read JSON mapping of uploaded file paths -> presigned URLs
@@ -55,16 +58,25 @@ runs:
     - name: Create metadata.json
       id: create_metadata
       shell: bash
+      env:
+        DOCKER_IMAGE: ${{ inputs.docker_image }}
+        DTB_URL: ${{ steps.process_urls.outputs.dtb_url }}
+        MACHINE: ${{ env.MACHINE }}
       run: |
+        set -euo pipefail
         echo "Creating metadata.json from job_render templates"
         cd ../job_render
+
         docker run -i --rm \
           --user "$(id -u):$(id -g)" \
-          --workdir="$PWD" \
-          -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-          -e dtb_url="${{ steps.process_urls.outputs.dtb_url }}" \
-          ${{ inputs.docker_image }} \
-          jq '.artifacts["dtbs/qcom/${{ env.MACHINE }}.dtb"] = env.dtb_url' data/metadata.json > temp.json && mv temp.json data/metadata.json
+          --workdir "$PWD" \
+          -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+          -e DTB_URL="$DTB_URL" \
+          -e MACHINE="$MACHINE" \
+          "$DOCKER_IMAGE" \
+          jq '.artifacts["dtbs/qcom/\(env.MACHINE).dtb"] = env.DTB_URL' data/metadata.json > temp.json
+
+        mv temp.json data/metadata.json
 
     - name: Upload metadata.json
       id: upload_metadata
@@ -73,124 +85,145 @@ runs:
         local_file: ../job_render/data/metadata.json
         s3_bucket: qli-prd-video-gh-artifacts
         mode: single-upload
+        upload_location: ${{ env.UPLOAD_LOCATION }}
 
     - name: Create template json cloudData.json
       shell: bash
+      env:
+        DOCKER_IMAGE: ${{ inputs.docker_image }}
+        METADATA_URL: ${{ steps.upload_metadata.outputs.presigned_url }}
+        IMAGE_URL: ${{ steps.process_urls.outputs.image_url }}
+        VMLINUX_URL: ${{ steps.process_urls.outputs.vmlinux_url }}
+        MODULES_URL: ${{ steps.process_urls.outputs.modules_url }}
+        MERGED_RAMDISK_URL: ${{ steps.process_urls.outputs.merged_ramdisk_url }}
       run: |
+        set -euo pipefail
         echo "Populating cloudData.json with kernel, vmlinux, modules, metadata, ramdisk"
-        metadata_url="${{ steps.upload_metadata.outputs.presigned_url }}"
-        image_url="${{ steps.process_urls.outputs.image_url }}"
-        vmlinux_url="${{ steps.process_urls.outputs.vmlinux_url }}"
-        modules_url="${{ steps.process_urls.outputs.modules_url }}"
-        merged_ramdisk_url="${{ steps.process_urls.outputs.merged_ramdisk_url }}"
-
         cd ../job_render
 
         # metadata
         docker run -i --rm \
           --user "$(id -u):$(id -g)" \
-          --workdir="$PWD" \
-          -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-          -e metadata_url="$metadata_url" \
-          ${{ inputs.docker_image }} \
-          jq '.artifacts.metadata = env.metadata_url' data/cloudData.json > temp.json && mv temp.json data/cloudData.json
+          --workdir "$PWD" \
+          -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+          -e METADATA_URL="$METADATA_URL" \
+          "$DOCKER_IMAGE" \
+          jq '.artifacts.metadata = env.METADATA_URL' data/cloudData.json > temp.json
+        mv temp.json data/cloudData.json
 
         # kernel Image
         docker run -i --rm \
           --user "$(id -u):$(id -g)" \
-          --workdir="$PWD" \
-          -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-          -e image_url="$image_url" \
-          ${{ inputs.docker_image }} \
-          jq '.artifacts.kernel = env.image_url' data/cloudData.json > temp.json && mv temp.json data/cloudData.json
+          --workdir "$PWD" \
+          -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+          -e IMAGE_URL="$IMAGE_URL" \
+          "$DOCKER_IMAGE" \
+          jq '.artifacts.kernel = env.IMAGE_URL' data/cloudData.json > temp.json
+        mv temp.json data/cloudData.json
 
         # vmlinux (set only if present)
-        docker run -i --rm \
-          --user "$(id -u):$(id -g)" \
-          --workdir="$PWD" \
-          -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-          -e vmlinux_url="$vmlinux_url" \
-          ${{ inputs.docker_image }} \
-          sh -c 'if [ -n "$vmlinux_url" ]; then jq ".artifacts.vmlinux = env.vmlinux_url" data/cloudData.json > temp.json && mv temp.json data/cloudData.json; fi'
+        if [ -n "$VMLINUX_URL" ]; then
+          docker run -i --rm \
+            --user "$(id -u):$(id -g)" \
+            --workdir "$PWD" \
+            -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+            -e VMLINUX_URL="$VMLINUX_URL" \
+            "$DOCKER_IMAGE" \
+            jq '.artifacts.vmlinux = env.VMLINUX_URL' data/cloudData.json > temp.json
+          mv temp.json data/cloudData.json
+        fi
 
         # modules
         docker run -i --rm \
           --user "$(id -u):$(id -g)" \
-          --workdir="$PWD" \
-          -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-          -e modules_url="$modules_url" \
-          ${{ inputs.docker_image }} \
-          jq '.artifacts.modules = env.modules_url' data/cloudData.json > temp.json && mv temp.json data/cloudData.json
+          --workdir "$PWD" \
+          -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+          -e MODULES_URL="$MODULES_URL" \
+          "$DOCKER_IMAGE" \
+          jq '.artifacts.modules = env.MODULES_URL' data/cloudData.json > temp.json
+        mv temp.json data/cloudData.json
 
         # ramdisk: use merged only here (fallback added in next step if missing)
-        docker run -i --rm \
-          --user "$(id -u):$(id -g)" \
-          --workdir="$PWD" \
-          -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-          -e merged_ramdisk_url="$merged_ramdisk_url" \
-          ${{ inputs.docker_image }} \
-          sh -c 'if [ -n "$merged_ramdisk_url" ]; then jq ".artifacts.ramdisk = env.merged_ramdisk_url" data/cloudData.json > temp.json && mv temp.json data/cloudData.json; fi'
+        if [ -n "$MERGED_RAMDISK_URL" ]; then
+          docker run -i --rm \
+            --user "$(id -u):$(id -g)" \
+            --workdir "$PWD" \
+            -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+            -e MERGED_RAMDISK_URL="$MERGED_RAMDISK_URL" \
+            "$DOCKER_IMAGE" \
+            jq '.artifacts.ramdisk = env.MERGED_RAMDISK_URL' data/cloudData.json > temp.json
+          mv temp.json data/cloudData.json
+        fi
 
     - name: Update firmware and ramdisk
       shell: bash
+      env:
+        DOCKER_IMAGE: ${{ inputs.docker_image }}
+        MERGED_RAMDISK_URL: ${{ steps.process_urls.outputs.merged_ramdisk_url }}
+        FIRMWARE: ${{ env.FIRMWARE }}
       run: |
         set -euo pipefail
         cd ../job_render
 
         # Fallback to stable kerneltest ramdisk only if merged ramdisk is not available
-        if [ -z "${{ steps.process_urls.outputs.merged_ramdisk_url }}" ]; then
+        if [ -z "$MERGED_RAMDISK_URL" ]; then
           echo "Merged ramdisk not found. Using stable kerneltest ramdisk fallback."
           ramdisk_url="$(aws s3 presign s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/initramfs/initramfs-kerneltest-full-image-qcom-armv8a.cpio.gz --expires 7600)"
           docker run -i --rm \
             --user "$(id -u):$(id -g)" \
-            --workdir="$PWD" \
-            -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-            -e ramdisk_url="$ramdisk_url" \
-            ${{ inputs.docker_image }} \
-            jq '.artifacts.ramdisk = env.ramdisk_url' data/cloudData.json > temp.json && mv temp.json data/cloudData.json
+            --workdir "$PWD" \
+            -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+            -e RAMDISK_URL="$ramdisk_url" \
+            "$DOCKER_IMAGE" \
+            jq '.artifacts.ramdisk = env.RAMDISK_URL' data/cloudData.json > temp.json
+          mv temp.json data/cloudData.json
         else
           echo "Ramdisk set from merged source; skipping kerneltest fallback."
         fi
 
         # Optional board-specific firmware initramfs
-        if [ -n "${{ env.FIRMWARE }}" ]; then
-          case "${{ env.FIRMWARE }}" in
+        if [ -n "$FIRMWARE" ]; then
+          case "$FIRMWARE" in
             sm8750-mtp)
               FW_FILE="initramfs-firmware-dragonboard410c-image-sm8750-mtp.cpio.gz"
               ;;
             *)
-              FW_FILE="initramfs-firmware-${{ env.FIRMWARE }}-image-qcom-armv8a.cpio.gz"
+              FW_FILE="initramfs-firmware-${FIRMWARE}-image-qcom-armv8a.cpio.gz"
               ;;
           esac
 
           echo "Using firmware file: $FW_FILE"
 
-          firmware_url="$(aws s3 presign s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/initramfs/${FW_FILE} --expires 7600)"
+          firmware_url="$(aws s3 presign "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/initramfs/${FW_FILE}" --expires 7600)"
 
           docker run -i --rm \
             --user "$(id -u):$(id -g)" \
-            --workdir="$PWD" \
-            -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-            -e firmware_url="$firmware_url" \
-            ${{ inputs.docker_image }} \
-            jq '.artifacts.firmware = env.firmware_url' data/cloudData.json > temp.json && mv temp.json data/cloudData.json
+            --workdir "$PWD" \
+            -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+            -e FIRMWARE_URL="$firmware_url" \
+            "$DOCKER_IMAGE" \
+            jq '.artifacts.firmware = env.FIRMWARE_URL' data/cloudData.json > temp.json
+          mv temp.json data/cloudData.json
         else
           echo "No FIRMWARE provided; skipping firmware artifact update."
         fi
 
     - name: Create lava_job_definition
       shell: bash
+      env:
+        DOCKER_IMAGE: ${{ inputs.docker_image }}
+        TARGET: ${{ env.LAVA_NAME }}
+        TARGET_DTB: ${{ env.MACHINE }}
       run: |
+        set -euo pipefail
         cd ../job_render
         mkdir -p renders
+
         docker run -i --rm \
           --user "$(id -u):$(id -g)" \
-          --workdir="$PWD" \
-          -v "$(dirname "$PWD")":"$(dirname "$PWD")" \
-          -e TARGET="${{ env.LAVA_NAME }}" \
-          -e TARGET_DTB="${{ env.MACHINE }}" \
-          ${{ inputs.docker_image }} \
-          sh -c 'export BOOT_METHOD=fastboot && \
-            export TARGET=${TARGET} && \
-            export TARGET_DTB=${TARGET_DTB} && \
-            python3 lava_Job_definition_generator.py --localjson ./data/cloudData.json --video_pre-merge'
+          --workdir "$PWD" \
+          -v "$(dirname "$PWD"):$(dirname "$PWD")" \
+          -e TARGET="$TARGET" \
+          -e TARGET_DTB="$TARGET_DTB" \
+          "$DOCKER_IMAGE" \
+          sh -c 'export BOOT_METHOD=fastboot && python3 lava_Job_definition_generator.py --localjson ./data/cloudData.json --video_pre-merge'
