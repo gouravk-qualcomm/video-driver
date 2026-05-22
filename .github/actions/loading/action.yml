@@ -61,8 +61,8 @@ runs:
           }
 
           // 5. Generate Outputs
-          const build_matrix = Object.values(targets).map(({ machine, firmware }) => ({ machine, firmware }));
+          const build_matrix = Object.values(targets).map(({ machine, firmware, meta_tar }) => ({ machine, firmware, meta_tar }));
           core.setOutput('build_matrix', JSON.stringify(build_matrix));
 
-          const full_matrix = Object.values(targets).map(({ machine, firmware, lavaname }) => ({ machine, firmware, lavaname }));
+          const full_matrix = Object.values(targets).map(({ machine, firmware, lavaname, meta_tar }) => ({ machine, firmware, lavaname, meta_tar }));
           core.setOutput('full_matrix', JSON.stringify(full_matrix));

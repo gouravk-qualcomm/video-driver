@@ -23,6 +23,11 @@ jobs:
       group: GHA-video-Prd-SelfHosted-RG
       labels: [self-hosted, video-prd-u2204-x64-large-od-ephem]
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.build_matrix) }}
+
     steps:
       - name: Pull Docker image
         uses: qualcomm-linux/kernel-config/.github/actions/pull_docker_image@main
@@ -36,7 +41,7 @@ jobs:
           fetch-depth: 0
 
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinux.main.final
+        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinuxmain.root
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -46,7 +51,7 @@ jobs:
 
       - name: Build workspace
         id: build_workspace
-        uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinux.main.final
+        uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
         with:
           docker_image: kmake-image:ver.1.0
           workspace_path: ${{ github.workspace }}
@@ -61,21 +66,20 @@ jobs:
           echo "🔧 Fixing file ownership (root -> runner user)..."
           sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE"
 
-      - name: Download iris_test_app from the s3
+      - name: Download iris_test_app from S3
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          echo "$WORKSPACE"
           mkdir -p "$WORKSPACE/v4l-video-test-app/build/"
-          echo "syncing files from s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/iris_test_app/"
+          echo "📥 Syncing iris_test_app from S3"
           aws s3 cp \
             "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/iris_test_app/" \
             "$WORKSPACE/v4l-video-test-app/build/" \
             --recursive
           echo "✅ Download complete"
-          ls "$WORKSPACE/v4l-video-test-app/build/"
+          ls -lh "$WORKSPACE/v4l-video-test-app/build/"
 
       - name: Download firmware file from S3
         shell: bash
@@ -84,122 +88,273 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$WORKSPACE/downloads"
-          echo "📥 Syncing files from S3 path: s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/"
+          echo "📥 Syncing vpu20_1v.mbn from S3"
           aws s3 cp \
             "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/vpu20_1v.mbn" \
             "$WORKSPACE/downloads/"
-          echo "✅ Download complete"
           [ -f "$WORKSPACE/downloads/vpu20_1v.mbn" ] || { echo "❌ Missing vpu20_1v.mbn"; exit 1; }
 
-      - name: Download the video-contents for testing
+      - name: Download video contents
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
           mkdir -p "$WORKSPACE/downloads"
-          echo "Downloading the video-content files"
+          echo "📥 Downloading video clips"
           wget -q \
             "https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz" \
             -O "$WORKSPACE/downloads/video_clips_iris.tar.gz"
           [ -f "$WORKSPACE/downloads/video_clips_iris.tar.gz" ] || { echo "❌ Failed to download video_clips_iris.tar.gz"; exit 1; }
 
-      - name: Prepare /data/vendor/iris_test_app and list contents
+      - name: Download target meta tar from S3
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          data_dir="$WORKSPACE/kobj/tar-install/data/vendor/iris_test_app"
-          data_dir2="$WORKSPACE/kobj/tar-install/data/vendor/iris_test_app/firmware"
-
-          mkdir -p "$data_dir"
-          mkdir -p "$data_dir2"
-
-          firmware_version="$(ls "$WORKSPACE/kobj/tar-install/lib/modules/")"
-          mkdir -p "$WORKSPACE/kobj/tar-install/lib/modules/$firmware_version/updates"
-
-          cp "$WORKSPACE/video-driver/video/iris_vpu.ko" \
-             "$WORKSPACE/kobj/tar-install/lib/modules/$firmware_version/updates/"
-          cp "$WORKSPACE/v4l-video-test-app/build/iris_v4l2_test" "$data_dir/"
-          cp "$WORKSPACE/downloads/vpu20_1v.mbn" "$data_dir2/"
-          cp "$WORKSPACE/downloads/video_clips_iris.tar.gz" "$data_dir/"
-
-          echo "📂 Contents of $data_dir:"
-          ls -lh "$data_dir"
-
-      - name: Create compressed kernel ramdisk archives
-        shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          cd "$WORKSPACE/kobj/tar-install"
-          find lib/modules data | cpio -o -H newc --owner=0:0 | gzip -9 > "$WORKSPACE/local-kernel-ramdisk.cpio.gz"
-          ls -lh "$WORKSPACE/local-kernel-ramdisk.cpio.gz"
-
-      - name: Download meta-qcom stable initramfs artifacts from S3
-        shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
+          META_TAR: ${{ matrix.meta_tar }}
         run: |
           set -euo pipefail
           mkdir -p "$WORKSPACE/downloads"
-          echo "🔍 Fetching initramfs files from S3 bucket: s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/initramfs/"
+          mkdir -p "$WORKSPACE/meta"
+
+          [ -n "$META_TAR" ] || { echo "❌ meta_tar is empty for this matrix entry"; exit 1; }
+
+          echo "📥 Downloading meta tar: $META_TAR"
           aws s3 cp \
-            "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/initramfs/initramfs-kerneltest-full-image-qcom-armv8a.cpio.gz" \
-            "$WORKSPACE/downloads/"
-          echo "Initramfs files downloaded to: $WORKSPACE/downloads"
+            "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" \
+            "$WORKSPACE/downloads/$META_TAR"
 
-      - name: Decompress ramdisk files and rename .cpio.gz files
+          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          mkdir -p "$META_DIR"
+          tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$META_DIR"
+
+          echo "✅ Extracted meta into: $META_DIR"
+          ls -lh "$META_DIR" | head -40
+
+      - name: Mount rootfs and inject iris files
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          cd "$WORKSPACE/downloads"
-          echo "Decompressing and renaming .cpio.gz files..."
-          gunzip -c initramfs-kerneltest-full-image-qcom-armv8a.cpio.gz > kerneltest.cpio
 
-      - name: Merge and repackage initramfs
+          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          ROOTFS_IMG="$META_DIR/rootfs.img"
+          [ -f "$ROOTFS_IMG" ] || { echo "❌ Missing rootfs.img: $ROOTFS_IMG"; exit 1; }
+
+          mkdir -p "$WORKSPACE/rootfs_mount"
+          sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
+          sudo mount -o loop "$ROOTFS_IMG" "$WORKSPACE/rootfs_mount"
+
+          KVER="$(ls "$WORKSPACE/rootfs_mount/lib/modules/" | head -1)"
+          echo "📌 Kernel version in rootfs: $KVER"
+
+          sudo mkdir -p "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates"
+          sudo cp "$WORKSPACE/video-driver/video/iris_vpu.ko" \
+            "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates/"
+
+          sudo mkdir -p "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware"
+          sudo cp "$WORKSPACE/v4l-video-test-app/build/iris_v4l2_test" \
+            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
+          sudo cp "$WORKSPACE/downloads/vpu20_1v.mbn" \
+            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware/"
+          sudo cp "$WORKSPACE/downloads/video_clips_iris.tar.gz" \
+            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
+
+          sudo chmod +x "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/iris_v4l2_test"
+
+          sudo depmod -b "$WORKSPACE/rootfs_mount" "$KVER" || true
+          sync
+          sudo umount "$WORKSPACE/rootfs_mount"
+
+          echo "✅ rootfs.img updated"
+          ls -lh "$ROOTFS_IMG"
+
+      - name: Generate clean EFI stub from current efi.bin
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          echo "🔧 Starting repackaging process"
 
-          mkdir -p "$WORKSPACE/combineramdisk"
-          cp "$WORKSPACE/local-kernel-ramdisk.cpio.gz" "$WORKSPACE/combineramdisk/"
+          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          TMPDIR="$WORKSPACE/efi_work/${{ matrix.machine }}"
+          mkdir -p "$TMPDIR"
 
-          cd "$WORKSPACE/combineramdisk"
+          python3 -m pip install --user -q pefile
 
-          mv local-kernel-ramdisk.cpio.gz local-kernel-ramdisk.cpio.gz.bak
-          gunzip -c local-kernel-ramdisk.cpio.gz.bak > local-kernel-ramdisk.cpio
+          cat > "$WORKSPACE/ukify.py" <<'PY'
+          # ukify script will be downloaded below
+          PY
+          curl -fsSL \
+            -o "$WORKSPACE/ukify.py" \
+            "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
+          chmod +x "$WORKSPACE/ukify.py"
 
-          cp "$WORKSPACE/downloads/kerneltest.cpio" .
+          python3 << 'EOF'
+          import os
+          import struct
+          import pefile
 
-          cat kerneltest.cpio local-kernel-ramdisk.cpio > video-merged.cpio
-          gzip -9 video-merged.cpio
+          src = os.path.join(os.environ["WORKSPACE"], "meta", "${{ matrix.machine }}", "efi.bin")
+          out = os.path.join(os.environ["WORKSPACE"], "efi_work", "${{ matrix.machine }}", "linuxaa64.efi.stub")
 
-          mkdir -p temp_merge
-          cd temp_merge
-          cpio -id --no-absolute-filenames < ../kerneltest.cpio
-          cpio -id --no-absolute-filenames < ../local-kernel-ramdisk.cpio
-          cd ..
+          os.makedirs(os.path.dirname(out), exist_ok=True)
 
-          rm -f video-merged.cpio.gz
+          pe = pefile.PE(src)
+          with open(src, "rb") as f:
+              raw = bytearray(f.read())
 
-          cd temp_merge
-          find . | cpio -o -H newc --owner=0:0 > ../video-merged.cpio
-          cd ..
+          keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
+          stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
+          stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
 
-          gzip -9 video-merged.cpio
+          pe_off = struct.unpack_from("<I", raw, 0x3C)[0]
+          num_sec_off = pe_off + 4 + 2
+          opt_hdr_size = struct.unpack_from("<H", raw, pe_off + 4 + 16)[0]
+          sec_table_off = pe_off + 4 + 20 + opt_hdr_size
 
-          rm -rf temp_merge kerneltest.cpio local-kernel-ramdisk.cpio
+          new_raw = bytearray(raw[:stub_end])
+          struct.pack_into("<H", new_raw, num_sec_off, len(stub_sections))
 
-          echo "Final archive: $WORKSPACE/combineramdisk/video-merged.cpio.gz"
-          ls -lh "$WORKSPACE/combineramdisk/video-merged.cpio.gz"
+          for i, s in enumerate(pe.sections):
+              name = s.Name.decode().rstrip("\x00")
+              if name not in keep:
+                  entry_off = sec_table_off + (i * 40)
+                  if entry_off + 40 <= len(new_raw):
+                      new_raw[entry_off:entry_off+40] = b"\x00" * 40
+
+          # Update SizeOfImage
+          size_of_image_off = pe_off + 4 + 20 + 56
+          new_size = ((stub_end + 0xFFF) & ~0xFFF)
+          struct.pack_into("<I", new_raw, size_of_image_off, new_size)
+
+          with open(out, "wb") as f:
+              f.write(new_raw)
+
+          print(out)
+          EOF
+
+          echo "✅ Clean stub created:"
+          ls -lh "$WORKSPACE/efi_work/${{ matrix.machine }}/linuxaa64.efi.stub"
+
+      - name: Extract initrd and cmdline from current efi.bin
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          TMPDIR="$WORKSPACE/efi_work/${{ matrix.machine }}"
+          mkdir -p "$TMPDIR"
+
+          python3 << 'EOF'
+          import os
+          import pefile
+
+          src = os.path.join(os.environ["WORKSPACE"], "meta", "${{ matrix.machine }}", "efi.bin")
+          out_initrd = os.path.join(os.environ["WORKSPACE"], "efi_work", "${{ matrix.machine }}", "initrd.img")
+          out_cmdline = os.path.join(os.environ["WORKSPACE"], "efi_work", "${{ matrix.machine }}", "cmdline.txt")
+
+          pe = pefile.PE(src)
+          for sec in pe.sections:
+              name = sec.Name.decode().rstrip("\x00")
+              if name == ".initrd":
+                  with open(out_initrd, "wb") as f:
+                      f.write(sec.get_data())
+              if name == ".cmdline":
+                  with open(out_cmdline, "wb") as f:
+                      f.write(sec.get_data().rstrip(b"\x00"))
+          print(out_initrd)
+          print(out_cmdline)
+          EOF
+
+          echo "✅ Extracted initrd/cmdline"
+          ls -lh "$WORKSPACE/efi_work/${{ matrix.machine }}/initrd.img" "$WORKSPACE/efi_work/${{ matrix.machine }}/cmdline.txt"
+          echo "--- cmdline ---"
+          cat "$WORKSPACE/efi_work/${{ matrix.machine }}/cmdline.txt"
+
+      - name: Generate efi.bin using ukify
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          TMPDIR="$WORKSPACE/efi_work/${{ matrix.machine }}"
+          DTB_PATH="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${{ matrix.machine }}.dtb"
+          UKIFY="$WORKSPACE/ukify.py"
+
+          [ -f "$DTB_PATH" ] || { echo "❌ Missing DTB: $DTB_PATH"; exit 1; }
+
+          python3 "$UKIFY" build \
+            --linux "$WORKSPACE/kobj/arch/arm64/boot/Image" \
+            --initrd "$TMPDIR/initrd.img" \
+            --cmdline @"$TMPDIR/cmdline.txt" \
+            --devicetree "$DTB_PATH" \
+            --stub "$TMPDIR/linuxaa64.efi.stub" \
+            --uname "$(basename "$(ls "$WORKSPACE/kobj/arch/arm64/boot/Image")" >/dev/null 2>&1; echo "7.1.0-rc2-00807-g9f3cbcbfaa5a")" \
+            --output "$TMPDIR/linux-${{ matrix.machine }}.efi"
+
+          echo "✅ UKI generated"
+          ls -lh "$TMPDIR/linux-${{ matrix.machine }}.efi"
+
+          # Replace inside meta
+          mkdir -p "$META_DIR/EFI/Linux"
+          cp -fv "$TMPDIR/linux-${{ matrix.machine }}.efi" "$META_DIR/EFI/Linux/linux-${{ matrix.machine }}.efi"
+          cp -fv "$TMPDIR/linux-${{ matrix.machine }}.efi" "$META_DIR/efi.bin" || true
+
+          echo "✅ efi.bin updated in meta"
+          ls -lh "$META_DIR/efi.bin"
+
+      - name: Generate dtb.bin and dtb vfat
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          DTB_PATH="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${{ matrix.machine }}.dtb"
+          OUT_DTB="$WORKSPACE/efi_work/${{ matrix.machine }}/dtb.bin"
+
+          [ -f "$DTB_PATH" ] || { echo "❌ Missing DTB: $DTB_PATH"; exit 1; }
+
+          dd if=/dev/zero of="$OUT_DTB" bs=1K count=4096 status=none
+          mkfs.vfat "$OUT_DTB" >/dev/null
+          mcopy -i "$OUT_DTB" "$DTB_PATH" ::
+
+          cp -fv "$OUT_DTB" "$META_DIR/dtb.bin"
+
+          # Replace the target-specific dtb vfat if present
+          if [ -f "$META_DIR/dtb-${{ matrix.machine }}-image.vfat" ]; then
+            cp -fv "$OUT_DTB" "$META_DIR/dtb-${{ matrix.machine }}-image.vfat"
+          fi
+
+          echo "✅ dtb.bin updated"
+          ls -lh "$META_DIR/dtb.bin"
+
+      - name: Repack updated meta tar
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          META_TAR: ${{ matrix.meta_tar }}
+        run: |
+          set -euo pipefail
+
+          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          OUTDIR="$WORKSPACE/output"
+          mkdir -p "$OUTDIR"
+
+          FINAL_TAR="$OUTDIR/$META_TAR"
+
+          rm -f "$FINAL_TAR"
+          tar -C "$META_DIR" -cf "$FINAL_TAR" .
+
+          echo "✅ Repacked meta tar:"
+          ls -lh "$FINAL_TAR"
 
       - name: Validate build_matrix and jq
         shell: bash
@@ -223,71 +378,26 @@ jobs:
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
-          BUILD_MATRIX: ${{ inputs.build_matrix }}
+          META_TAR: ${{ matrix.meta_tar }}
         run: |
           set -euo pipefail
 
           workspace="$WORKSPACE"
           file_list="$workspace/artifacts/file_list.txt"
           mkdir -p "$workspace/artifacts"
-
           : > "$file_list"
 
-          mod_root="$workspace/kobj/tar-install/lib/modules"
-          [ -d "$mod_root" ] || { echo "❌ Missing directory: $mod_root"; exit 1; }
+          FINAL_TAR="$workspace/output/$META_TAR"
+          [ -f "$FINAL_TAR" ] || { echo "❌ Missing final meta tar: $FINAL_TAR"; exit 1; }
 
-          tar -C "$workspace/kobj/tar-install" \
-            --exclude='lib/modules/*/build' \
-            --exclude='lib/modules/*/source' \
-            --numeric-owner --owner=0 --group=0 \
-            -cJf "$workspace/modules.tar.xz" lib/modules
-
-          if tar -Jtvf "$workspace/modules.tar.xz" | grep -q ' -> '; then
-            echo "❌ Symlinks found in modules archive (should be none)"
-            exit 1
-          fi
-
-          if tar -Jtf "$workspace/modules.tar.xz" | grep -Eq '^/|(^|/)\.\.(/|$)'; then
-            echo "❌ Unsafe paths found in modules archive"
-            exit 1
-          fi
-
-          echo "$workspace/modules.tar.xz" >> "$file_list"
-          echo "✅ Queued for upload: $workspace/modules.tar.xz"
-
-          IMAGE_PATH="$workspace/kobj/arch/arm64/boot/Image"
-          VMLINUX_PATH="$workspace/kobj/vmlinux"
-          MERGED_PATH="$workspace/combineramdisk/video-merged.cpio.gz"
-
-          [ -f "$IMAGE_PATH" ] || { echo "❌ Missing expected file: $IMAGE_PATH"; exit 1; }
-          [ -f "$VMLINUX_PATH" ] || { echo "❌ Missing expected file: $VMLINUX_PATH"; exit 1; }
-          [ -f "$MERGED_PATH" ] || { echo "❌ Missing merged cpio: $MERGED_PATH"; exit 1; }
-
-          echo "$IMAGE_PATH" >> "$file_list"
-          echo "✅ Queued for upload: $IMAGE_PATH"
-
-          echo "$VMLINUX_PATH" >> "$file_list"
-          echo "✅ Queued for upload: $VMLINUX_PATH"
-
-          echo "$MERGED_PATH" >> "$file_list"
-          echo "✅ Queued for upload: $MERGED_PATH"
-
-          while IFS= read -r machine; do
-            dtb="$workspace/kobj/arch/arm64/boot/dts/qcom/${machine}.dtb"
-            if [ -f "$dtb" ]; then
-              echo "$dtb" >> "$file_list"
-              echo "✅ Queued for upload: $dtb"
-            else
-              echo "❌ Missing DTB: $dtb"
-              exit 1
-            fi
-          done < <(printf '%s' "$BUILD_MATRIX" | jq -r '.[].machine')
+          echo "$FINAL_TAR" >> "$file_list"
+          echo "✅ Queued for upload: $FINAL_TAR"
 
           echo "----- Files queued for S3 upload -----"
           cat "$file_list"
 
-      - name: Upload all artifacts to S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinux.main.final
+      - name: Upload final meta tar to S3
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinuxmain.root
         with:
           s3_bucket: qli-prd-video-gh-artifacts
           local_file: ${{ github.workspace }}/artifacts/file_list.txt
@@ -306,8 +416,13 @@ jobs:
           rm -rf "$ws/combineramdisk" || true
           rm -rf "$ws/downloads" || true
           rm -rf "$ws/kobj" || true
+          rm -rf "$ws/meta" || true
+          rm -rf "$ws/output" || true
+          rm -rf "$ws/rootfs_mount" || true
+          rm -rf "$ws/efi_work" || true
           rm -f "$ws/modules.tar.xz" || true
           rm -f "$ws/local-kernel-ramdisk.cpio.gz" || true
+          rm -f "$ws/ukify.py" || true
 
       - name: Update summary
         if: success() || failure()

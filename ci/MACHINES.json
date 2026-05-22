@@ -5,7 +5,8 @@
     "lavaname": "qcs6490-rb3gen2",
     "target": "qcs6490-rb3gen2",
     "buildid": "QCM6490.LE.1.0-00376-STD.PROD-1",
-    "firmwareid": "rb3gen2"
+    "firmwareid": "rb3gen2",
+    "meta_tar": "qcom-multimedia-proprietary-image-rb3gen2-core-kit.rootfs.qcomflash.tar"
   },
   "qcs9100-ride-r3": {
     "machine": "qcs9100-ride-r3",
@@ -13,7 +14,8 @@
     "lavaname": "qcs9100-ride",
     "target": "qcs9100-ride-r3",
     "buildid": "QCS9100.LE.1.0-00243-STD.PROD-1",
-    "firmwareid": "sa8775p-ride"
+    "firmwareid": "sa8775p-ride",
+    "meta_tar": "qcom-multimedia-proprietary-image-qcs9100-ride-sx.rootfs.qcomflash.tar"
   },
   "qcs8300-ride": {
     "machine": "qcs8300-ride",
@@ -21,22 +23,25 @@
     "lavaname": "qcs8300-ride",
     "target": "qcs8300-ride",
     "buildid": "QCS8300.LE.1.0-00137-STD.PROD-1",
-    "firmwareid": "qcs8300-ride"
-  }, 
+    "firmwareid": "qcs8300-ride",
+    "meta_tar": "qcom-multimedia-proprietary-image-qcs8300-ride-sx.rootfs.qcomflash.tar"
+  },
   "qcs615-ride": {
     "machine": "qcs615-ride",
     "firmware": "qcs615-ride",
     "lavaname": "qcs615-ride",
     "target": "qcs615-ride",
     "buildid": "QCS615.LE.1.0-00016-STD.PROD-1",
-    "firmwareid": "qcs615-ride"
+    "firmwareid": "qcs615-ride",
+    "meta_tar": "qcom-multimedia-proprietary-image-iq-615-evk.rootfs.qcomflash.tar"
   },
   "sm8750-mtp": {
-  "machine": "sm8750-mtp",
-  "firmware": "sm8750-mtp",
-  "lavaname": "sm8750-mtp",
-  "target": "sm8750-mtp",
-  "buildid": "YOUR_BUILD_ID",
-  "firmwareid": "sm8750-mtp"
-}
+    "machine": "sm8750-mtp",
+    "firmware": "sm8750-mtp",
+    "lavaname": "sm8750-mtp",
+    "target": "sm8750-mtp",
+    "buildid": "YOUR_BUILD_ID",
+    "firmwareid": "sm8750-mtp",
+    "meta_tar": "qcom-multimedia-proprietary-image-sm8750-mtp.rootfs.qcomflash.tar"
+  }
 }
