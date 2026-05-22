@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
 
       - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinux.main.final
+        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinuxmain.root
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref }}
@@ -51,7 +51,7 @@ jobs:
 
       - name: Build workspace
         id: build_workspace
-        uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinux.main.final
+        uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
         with:
           docker_image: kmake-image:ver.1.0
           workspace_path: ${{ github.workspace }}
@@ -63,15 +63,8 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          sudo chown -R $(id -u):$(id -g) "$WORKSPACE"
-
-      - name: Install helper tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y python3-pip mtools dosfstools
-          python3 -m pip install --user -q pefile
+          echo "🔧 Fixing file ownership (root -> runner user)..."
+          sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE"
 
       - name: Download iris artifacts from S3
         shell: bash
@@ -84,10 +77,10 @@ jobs:
           aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/iris_test_app/" "$WORKSPACE/downloads/iris_test_app/" --recursive
           # Download Firmware
           aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/vpu20_1v.mbn" "$WORKSPACE/downloads/"
-          # Download Clips
+          # Download Video Content
           wget -q "https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz" -O "$WORKSPACE/downloads/video_clips_iris.tar.gz"
 
-      - name: Download and Extract Target Meta
+      - name: Extract Meta Tarball
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -96,35 +89,25 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$WORKSPACE/meta_dir"
-          echo "📥 Downloading meta: $META_TAR"
-          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" "$WORKSPACE/downloads/"
-          
-          echo "📦 Extracting meta tar..."
+          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" "$WORKSPACE/downloads/$META_TAR"
           tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$WORKSPACE/meta_dir"
-          
-          # Flatten directory if nested
-          INNER_DIR=$(find "$WORKSPACE/meta_dir" -maxdepth 1 -type d -name "qcom-multimedia*" | head -1)
-          if [ -n "$INNER_DIR" ]; then
-             mv $INNER_DIR/* "$WORKSPACE/meta_dir/"
-          fi
-          echo "✅ Meta ready at $WORKSPACE/meta_dir"
+          echo "✅ Meta extracted"
 
-      - name: Mount rootfs and inject iris artifacts
+      - name: Mount rootfs and inject artifacts
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          ROOTFS_IMG="$WORKSPACE/meta_dir/rootfs.img"
-          [ -f "$ROOTFS_IMG" ] || { echo "❌ Missing rootfs.img"; exit 1; }
-
+          ROOTFS_IMG=$(find "$WORKSPACE/meta_dir" -name "rootfs.img" | head -1)
+          [ -f "$ROOTFS_IMG" ] || { echo "❌ rootfs.img not found"; exit 1; }
+          
           mkdir -p "$WORKSPACE/rootfs_mount"
+          sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
           sudo mount -o loop "$ROOTFS_IMG" "$WORKSPACE/rootfs_mount"
-
+          
           KVER=$(ls "$WORKSPACE/rootfs_mount/lib/modules/" | head -1)
-          echo "📌 Injecting into Kernel: $KVER"
-
           sudo mkdir -p "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates"
           sudo cp "$WORKSPACE/video-driver/video/iris_vpu.ko" "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates/"
           
@@ -132,104 +115,101 @@ jobs:
           sudo cp "$WORKSPACE/downloads/iris_test_app/iris_v4l2_test" "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
           sudo cp "$WORKSPACE/downloads/vpu20_1v.mbn" "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware/"
           sudo cp "$WORKSPACE/downloads/video_clips_iris.tar.gz" "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
-          
           sudo chmod +x "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/iris_v4l2_test"
-          sudo depmod -b "$WORKSPACE/rootfs_mount" "$KVER"
           
+          sudo depmod -b "$WORKSPACE/rootfs_mount" "$KVER"
           sync && sudo umount "$WORKSPACE/rootfs_mount"
-          echo "✅ rootfs.img updated"
+          echo "✅ rootfs updated"
 
-      - name: Rebuild efi.bin (UKI Generation)
+      - name: Rebuild efi.bin (UKI + rootdelay fix)
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          EFI_BIN="$WORKSPACE/meta_dir/efi.bin"
+          EFI_BIN=$(find "$WORKSPACE/meta_dir" -name "efi.bin" | head -1)
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           TMP_EFI="$WORKSPACE/efi_rebuild"
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount"
-
-          # 1. Download ukify.py
+          
+          python3 -m pip install --user -q pefile
           curl -fsSL -o "$WORKSPACE/ukify.py" "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
           chmod +x "$WORKSPACE/ukify.py"
-
-          # 2. Extract sections from original efi.bin
+          
           sudo mount -o loop "$EFI_BIN" "$WORKSPACE/efi_mount"
-          UKI_SRC=$(find "$WORKSPACE/efi_mount/EFI/Linux" -name "*.efi" | head -1)
+          export UKI_SRC=$(find "$WORKSPACE/efi_mount/EFI/Linux" -name "*.efi" | head -1)
+          export REBUILD_DIR="$TMP_EFI"
           
           python3 << 'EOF'
           import os, pefile, struct
-          pe = pefile.PE(os.environ["UKI_SRC"])
-          with open(os.environ["UKI_SRC"], "rb") as f: raw = bytearray(f.read())
-          # Extract payload
+          uki_path = os.environ["UKI_SRC"]
+          rebuild_dir = os.environ["REBUILD_DIR"]
+          pe = pefile.PE(uki_path)
+          with open(uki_path, "rb") as f: raw = bytearray(f.read())
+          
           for sec in pe.sections:
               name = sec.Name.decode().rstrip("\x00")
-              if name == ".initrd": open("efi_rebuild/initrd.img", "wb").write(sec.get_data())
-              if name == ".cmdline": open("efi_rebuild/cmdline.txt", "wb").write(sec.get_data().rstrip(b"\x00"))
-          # Build Clean Stub
+              if name == ".initrd": open(os.path.join(rebuild_dir, "initrd.img"), "wb").write(sec.get_data())
+              if name == ".cmdline": open(os.path.join(rebuild_dir, "cmdline.txt"), "wb").write(sec.get_data().rstrip(b"\x00"))
+          
           keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
           stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
           stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
           stub_raw = bytearray(raw[:stub_end])
           pe_off = struct.unpack_from("<I", raw, 0x3C)[0]
           struct.pack_into("<H", stub_raw, pe_off + 4 + 2, len(stub_sections))
-          open("efi_rebuild/stub.efi", "wb").write(stub_raw)
+          open(os.path.join(rebuild_dir, "stub.efi"), "wb").write(stub_raw)
           EOF
-
-          # 3. Build new UKI with rootdelay fix
-          CMDLINE=$(cat "$TMP_EFI/cmdline.txt")" rootdelay=10 rootwait"
+          
+          # Add rootdelay to fix mount timeout
+          ORIG_CMD=$(cat "$TMP_EFI/cmdline.txt")
+          NEW_CMD="$ORIG_CMD rootdelay=10 rootwait"
+          
           python3 "$WORKSPACE/ukify.py" build \
             --linux "$WORKSPACE/kobj/arch/arm64/boot/Image" \
             --initrd "$TMP_EFI/initrd.img" \
-            --cmdline "$CMDLINE" \
+            --cmdline "$NEW_CMD" \
             --devicetree "$DTB_SRC" \
             --stub "$TMP_EFI/stub.efi" \
             --output "$TMP_EFI/new_uki.efi"
-
-          # 4. Patch back into efi.bin
+          
           sudo cp -fv "$TMP_EFI/new_uki.efi" "$UKI_SRC"
           sync && sudo umount "$WORKSPACE/efi_mount"
-          echo "✅ efi.bin rebuilt"
+          echo "✅ efi.bin patched"
 
-      - name: Generate dtb.bin VFAT
+      - name: Rebuild dtb.bin
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          OUT_DTB="$WORKSPACE/meta_dir/dtb.bin"
+          DTB_BIN=$(find "$WORKSPACE/meta_dir" -name "dtb.bin" | head -1)
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-          dd if=/dev/zero of="$OUT_DTB" bs=1K count=4096 status=none
-          mkfs.vfat "$OUT_DTB" > /dev/null
-          mcopy -i "$OUT_DTB" "$DTB_SRC" ::
-          echo "✅ dtb.bin generated"
+          dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096
+          mkfs.vfat "$WORKSPACE/new_dtb.bin"
+          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" ::
+          cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
+          echo "✅ dtb.bin updated"
 
       - name: Repack and Upload Meta
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
           META_TAR: ${{ matrix.meta_tar }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          mkdir -p "$WORKSPACE/final_artifacts"
-          tar -C "$WORKSPACE/meta_dir" -cf "$WORKSPACE/final_artifacts/$META_TAR" .
-          echo "$WORKSPACE/final_artifacts/$META_TAR" > "$WORKSPACE/artifacts/file_list.txt"
-
-      - name: Upload updated Meta to S3
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinux.main.final
+          cd "$WORKSPACE/meta_dir"
+          tar -cf "$WORKSPACE/updated_$META_TAR" .
+          
+          echo "$WORKSPACE/updated_$META_TAR" > "$WORKSPACE/artifacts_list.txt"
+          
+      - name: Upload updated meta to S3
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinuxmain.root
         with:
           s3_bucket: qli-prd-video-gh-artifacts
-          local_file: ${{ github.workspace }}/artifacts/file_list.txt
+          local_file: ${{ github.workspace }}/artifacts_list.txt
           mode: multi-upload
-          upload_location: patched-meta/${{ github.run_id }}
-
-      - name: Clean up
-        if: always()
-        shell: bash
-        run: |
-          sudo umount ${{ github.workspace }}/rootfs_mount || true
-          sudo umount ${{ github.workspace }}/efi_mount || true
-          rm -rf ${{ github.workspace }}/meta_dir ${{ github.workspace }}/downloads ${{ github.workspace }}/efi_rebuild
+          upload_location: ${{ github.repository_owner }}/${{ github.event.repository.name }}/updated-meta/${{ github.run_id }}
