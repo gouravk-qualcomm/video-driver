@@ -112,41 +112,50 @@ jobs:
         env:
           WORKSPACE: ${{ github.workspace }}
           META_TAR: ${{ matrix.meta_tar }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          mkdir -p "$WORKSPACE/downloads"
-          mkdir -p "$WORKSPACE/meta"
 
           [ -n "$META_TAR" ] || { echo "❌ meta_tar is empty for this matrix entry"; exit 1; }
 
-          echo "📥 Downloading meta tar: $META_TAR"
+          mkdir -p "$WORKSPACE/downloads"
+          mkdir -p "$WORKSPACE/meta"
+
+          echo "📥 Downloading meta tar for $MACHINE: $META_TAR"
           aws s3 cp \
             "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" \
             "$WORKSPACE/downloads/$META_TAR"
 
-          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          META_DIR="$WORKSPACE/meta/$MACHINE"
+          rm -rf "$META_DIR"
           mkdir -p "$META_DIR"
+
+          echo "📦 Extracting meta tar into: $META_DIR"
           tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$META_DIR"
 
-          echo "✅ Extracted meta into: $META_DIR"
+          echo "✅ Extracted meta contents:"
           ls -lh "$META_DIR" | head -40
 
       - name: Mount rootfs and inject iris files
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
 
-          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
-          ROOTFS_IMG="$META_DIR/rootfs.img"
-          [ -f "$ROOTFS_IMG" ] || { echo "❌ Missing rootfs.img: $ROOTFS_IMG"; exit 1; }
+          META_DIR="$WORKSPACE/meta/$MACHINE"
+          ROOTFS_IMG="$(find "$META_DIR" -name rootfs.img | head -1)"
+          [ -f "$ROOTFS_IMG" ] || { echo "❌ Missing rootfs.img under $META_DIR"; exit 1; }
+
+          echo "📌 Using rootfs image: $ROOTFS_IMG"
 
           mkdir -p "$WORKSPACE/rootfs_mount"
           sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
           sudo mount -o loop "$ROOTFS_IMG" "$WORKSPACE/rootfs_mount"
 
           KVER="$(ls "$WORKSPACE/rootfs_mount/lib/modules/" | head -1)"
+          [ -n "$KVER" ] || { echo "❌ Could not detect kernel version in rootfs"; exit 1; }
           echo "📌 Kernel version in rootfs: $KVER"
 
           sudo mkdir -p "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates"
@@ -162,7 +171,6 @@ jobs:
             "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
 
           sudo chmod +x "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/iris_v4l2_test"
-
           sudo depmod -b "$WORKSPACE/rootfs_mount" "$KVER" || true
           sync
           sudo umount "$WORKSPACE/rootfs_mount"
@@ -170,43 +178,66 @@ jobs:
           echo "✅ rootfs.img updated"
           ls -lh "$ROOTFS_IMG"
 
-      - name: Generate clean EFI stub from current efi.bin
+      - name: Install ukify helper and pefile
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-
-          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
-          TMPDIR="$WORKSPACE/efi_work/${{ matrix.machine }}"
-          mkdir -p "$TMPDIR"
-
           python3 -m pip install --user -q pefile
-
-          cat > "$WORKSPACE/ukify.py" <<'PY'
-          # ukify script will be downloaded below
-          PY
           curl -fsSL \
             -o "$WORKSPACE/ukify.py" \
             "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
           chmod +x "$WORKSPACE/ukify.py"
+          echo "✅ ukify helper ready"
+          python3 "$WORKSPACE/ukify.py" --version || true
+
+      - name: Extract initrd, cmdline and build clean EFI stub
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+
+          META_DIR="$WORKSPACE/meta/$MACHINE"
+          TMPDIR="$WORKSPACE/efi_work/$MACHINE"
+          EFI_MOUNT="$WORKSPACE/efi_mount/$MACHINE"
+
+          mkdir -p "$TMPDIR"
+          mkdir -p "$EFI_MOUNT"
+
+          sudo umount "$EFI_MOUNT" 2>/dev/null || true
+          sudo mount -o loop "$META_DIR/efi.bin" "$EFI_MOUNT"
+
+          UKI_SRC="$(find "$EFI_MOUNT/EFI/Linux" -maxdepth 1 -name "*.efi" | head -1)"
+          [ -f "$UKI_SRC" ] || { echo "❌ Could not find UKI inside efi.bin"; exit 1; }
+
+          UKI_NAME="$(basename "$UKI_SRC")"
+          echo "$UKI_NAME" > "$TMPDIR/uki_name.txt"
+          echo "📌 Current UKI: $UKI_NAME"
 
           python3 << 'EOF'
           import os
           import struct
           import pefile
 
-          src = os.path.join(os.environ["WORKSPACE"], "meta", "${{ matrix.machine }}", "efi.bin")
-          out = os.path.join(os.environ["WORKSPACE"], "efi_work", "${{ matrix.machine }}", "linuxaa64.efi.stub")
-
-          os.makedirs(os.path.dirname(out), exist_ok=True)
+          work = os.environ["WORKSPACE"]
+          machine = os.environ["MACHINE"]
+          src = os.path.join(work, "efi_mount", machine, "EFI", "Linux", [f for f in os.listdir(os.path.join(work, "efi_mount", machine, "EFI", "Linux")) if f.endswith(".efi")][0])
+          out_initrd = os.path.join(work, "efi_work", machine, "initrd.img")
+          out_cmdline = os.path.join(work, "efi_work", machine, "cmdline.txt")
+          out_stub = os.path.join(work, "efi_work", machine, "linuxaa64.efi.stub")
 
           pe = pefile.PE(src)
-          with open(src, "rb") as f:
-              raw = bytearray(f.read())
+          raw = bytearray(open(src, "rb").read())
 
           keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
           stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
+
+          if not stub_sections:
+              raise SystemExit("No stub sections found")
+
           stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
 
           pe_off = struct.unpack_from("<I", raw, 0x3C)[0]
@@ -224,101 +255,93 @@ jobs:
                   if entry_off + 40 <= len(new_raw):
                       new_raw[entry_off:entry_off+40] = b"\x00" * 40
 
-          # Update SizeOfImage
           size_of_image_off = pe_off + 4 + 20 + 56
           new_size = ((stub_end + 0xFFF) & ~0xFFF)
           struct.pack_into("<I", new_raw, size_of_image_off, new_size)
 
-          with open(out, "wb") as f:
+          os.makedirs(os.path.dirname(out_stub), exist_ok=True)
+          with open(out_stub, "wb") as f:
               f.write(new_raw)
 
-          print(out)
-          EOF
-
-          echo "✅ Clean stub created:"
-          ls -lh "$WORKSPACE/efi_work/${{ matrix.machine }}/linuxaa64.efi.stub"
-
-      - name: Extract initrd and cmdline from current efi.bin
-        shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-
-          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
-          TMPDIR="$WORKSPACE/efi_work/${{ matrix.machine }}"
-          mkdir -p "$TMPDIR"
-
-          python3 << 'EOF'
-          import os
-          import pefile
-
-          src = os.path.join(os.environ["WORKSPACE"], "meta", "${{ matrix.machine }}", "efi.bin")
-          out_initrd = os.path.join(os.environ["WORKSPACE"], "efi_work", "${{ matrix.machine }}", "initrd.img")
-          out_cmdline = os.path.join(os.environ["WORKSPACE"], "efi_work", "${{ matrix.machine }}", "cmdline.txt")
-
-          pe = pefile.PE(src)
+          # Extract initrd and cmdline from existing UKI
           for sec in pe.sections:
               name = sec.Name.decode().rstrip("\x00")
               if name == ".initrd":
                   with open(out_initrd, "wb") as f:
                       f.write(sec.get_data())
-              if name == ".cmdline":
+              elif name == ".cmdline":
                   with open(out_cmdline, "wb") as f:
                       f.write(sec.get_data().rstrip(b"\x00"))
+
+          print(out_stub)
           print(out_initrd)
           print(out_cmdline)
           EOF
 
-          echo "✅ Extracted initrd/cmdline"
-          ls -lh "$WORKSPACE/efi_work/${{ matrix.machine }}/initrd.img" "$WORKSPACE/efi_work/${{ matrix.machine }}/cmdline.txt"
-          echo "--- cmdline ---"
-          cat "$WORKSPACE/efi_work/${{ matrix.machine }}/cmdline.txt"
+          sudo umount "$EFI_MOUNT"
 
-      - name: Generate efi.bin using ukify
+          echo "✅ Clean EFI stub, initrd and cmdline extracted"
+          ls -lh "$TMPDIR/linuxaa64.efi.stub" "$TMPDIR/initrd.img" "$TMPDIR/cmdline.txt"
+          echo "--- cmdline ---"
+          cat "$TMPDIR/cmdline.txt"
+
+      - name: Generate efi.bin using ukify and patch meta
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
 
-          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
-          TMPDIR="$WORKSPACE/efi_work/${{ matrix.machine }}"
-          DTB_PATH="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${{ matrix.machine }}.dtb"
+          META_DIR="$WORKSPACE/meta/$MACHINE"
+          TMPDIR="$WORKSPACE/efi_work/$MACHINE"
+          EFI_MOUNT="$WORKSPACE/efi_mount/$MACHINE"
+          DTB_PATH="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/$MACHINE.dtb"
           UKIFY="$WORKSPACE/ukify.py"
+          KVER="$(ls "$WORKSPACE/kobj/tar-install/lib/modules/" | head -1)"
 
           [ -f "$DTB_PATH" ] || { echo "❌ Missing DTB: $DTB_PATH"; exit 1; }
+
+          UKI_NAME="$(cat "$TMPDIR/uki_name.txt")"
 
           python3 "$UKIFY" build \
             --linux "$WORKSPACE/kobj/arch/arm64/boot/Image" \
             --initrd "$TMPDIR/initrd.img" \
-            --cmdline @"$TMPDIR/cmdline.txt" \
+            --cmdline "$(cat "$TMPDIR/cmdline.txt")" \
             --devicetree "$DTB_PATH" \
             --stub "$TMPDIR/linuxaa64.efi.stub" \
-            --uname "$(basename "$(ls "$WORKSPACE/kobj/arch/arm64/boot/Image")" >/dev/null 2>&1; echo "7.1.0-rc2-00807-g9f3cbcbfaa5a")" \
-            --output "$TMPDIR/linux-${{ matrix.machine }}.efi"
+            --uname "$KVER" \
+            --output "$TMPDIR/$UKI_NAME"
 
-          echo "✅ UKI generated"
-          ls -lh "$TMPDIR/linux-${{ matrix.machine }}.efi"
+          echo "✅ UKI generated:"
+          ls -lh "$TMPDIR/$UKI_NAME"
 
-          # Replace inside meta
-          mkdir -p "$META_DIR/EFI/Linux"
-          cp -fv "$TMPDIR/linux-${{ matrix.machine }}.efi" "$META_DIR/EFI/Linux/linux-${{ matrix.machine }}.efi"
-          cp -fv "$TMPDIR/linux-${{ matrix.machine }}.efi" "$META_DIR/efi.bin" || true
+          sudo umount "$EFI_MOUNT" 2>/dev/null || true
+          sudo mount -o loop "$META_DIR/efi.bin" "$EFI_MOUNT"
+
+          EXISTING_UKI="$(find "$EFI_MOUNT/EFI/Linux" -maxdepth 1 -name "*.efi" | head -1)"
+          [ -f "$EXISTING_UKI" ] || { echo "❌ Existing UKI not found in mounted efi.bin"; exit 1; }
+          EXISTING_NAME="$(basename "$EXISTING_UKI")"
+
+          sudo cp -f "$TMPDIR/$UKI_NAME" "$EFI_MOUNT/EFI/Linux/$EXISTING_NAME"
+          sync
+          sudo umount "$EFI_MOUNT"
 
           echo "✅ efi.bin updated in meta"
           ls -lh "$META_DIR/efi.bin"
 
-      - name: Generate dtb.bin and dtb vfat
+      - name: Generate dtb.bin and target dtb vfat
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
 
-          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
-          DTB_PATH="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${{ matrix.machine }}.dtb"
-          OUT_DTB="$WORKSPACE/efi_work/${{ matrix.machine }}/dtb.bin"
+          META_DIR="$WORKSPACE/meta/$MACHINE"
+          TMPDIR="$WORKSPACE/efi_work/$MACHINE"
+          DTB_PATH="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/$MACHINE.dtb"
+          OUT_DTB="$TMPDIR/dtb.bin"
 
           [ -f "$DTB_PATH" ] || { echo "❌ Missing DTB: $DTB_PATH"; exit 1; }
 
@@ -328,9 +351,9 @@ jobs:
 
           cp -fv "$OUT_DTB" "$META_DIR/dtb.bin"
 
-          # Replace the target-specific dtb vfat if present
-          if [ -f "$META_DIR/dtb-${{ matrix.machine }}-image.vfat" ]; then
-            cp -fv "$OUT_DTB" "$META_DIR/dtb-${{ matrix.machine }}-image.vfat"
+          # Replace target-specific dtb vfat if it exists
+          if [ -f "$META_DIR/dtb-$MACHINE-image.vfat" ]; then
+            cp -fv "$OUT_DTB" "$META_DIR/dtb-$MACHINE-image.vfat"
           fi
 
           echo "✅ dtb.bin updated"
@@ -341,16 +364,17 @@ jobs:
         env:
           WORKSPACE: ${{ github.workspace }}
           META_TAR: ${{ matrix.meta_tar }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
 
-          META_DIR="$WORKSPACE/meta/${{ matrix.machine }}"
+          META_DIR="$WORKSPACE/meta/$MACHINE"
           OUTDIR="$WORKSPACE/output"
           mkdir -p "$OUTDIR"
 
           FINAL_TAR="$OUTDIR/$META_TAR"
-
           rm -f "$FINAL_TAR"
+
           tar -C "$META_DIR" -cf "$FINAL_TAR" .
 
           echo "✅ Repacked meta tar:"
@@ -374,11 +398,12 @@ jobs:
 
           echo "✅ build_matrix is valid JSON"
 
-      - name: Append artifacts to S3 upload list
+      - name: Append final meta tar to upload list
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
           META_TAR: ${{ matrix.meta_tar }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
 
@@ -413,15 +438,13 @@ jobs:
           set -euo pipefail
           ws="$WORKSPACE"
           rm -rf "$ws/artifacts" || true
-          rm -rf "$ws/combineramdisk" || true
           rm -rf "$ws/downloads" || true
           rm -rf "$ws/kobj" || true
           rm -rf "$ws/meta" || true
           rm -rf "$ws/output" || true
           rm -rf "$ws/rootfs_mount" || true
+          rm -rf "$ws/efi_mount" || true
           rm -rf "$ws/efi_work" || true
-          rm -f "$ws/modules.tar.xz" || true
-          rm -f "$ws/local-kernel-ramdisk.cpio.gz" || true
           rm -f "$ws/ukify.py" || true
 
       - name: Update summary

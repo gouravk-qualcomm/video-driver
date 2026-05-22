@@ -21,48 +21,79 @@ runs:
           const fs = require('fs');
           const path = require('path');
 
-          // 1. Define possible paths for MACHINES.json
-          // Path A: Workspace/video-driver/ci/MACHINES.json (Nested)
-          const pathNested = path.join(process.env.GITHUB_WORKSPACE, 'video-driver', 'ci', 'MACHINES.json');
-          // Path B: Workspace/ci/MACHINES.json (Root)
-          const pathRoot = path.join(process.env.GITHUB_WORKSPACE, 'ci', 'MACHINES.json');
+          const pathNested1 = path.join(process.env.GITHUB_WORKSPACE, 'video-driver', 'ci', 'machine.json');
+          const pathNested2 = path.join(process.env.GITHUB_WORKSPACE, 'video-driver', 'ci', 'MACHINES.json');
+          const pathRoot1 = path.join(process.env.GITHUB_WORKSPACE, 'ci', 'machine.json');
+          const pathRoot2 = path.join(process.env.GITHUB_WORKSPACE, 'ci', 'MACHINES.json');
 
           let targetsPath = '';
 
-          // 2. Check which path exists
-          if (fs.existsSync(pathNested)) {
-            console.log(`Found config at nested path: ${pathNested}`);
-            targetsPath = pathNested;
-          } else if (fs.existsSync(pathRoot)) {
-            console.log(`Found config at root path: ${pathRoot}`);
-            targetsPath = pathRoot;
+          if (fs.existsSync(pathNested1)) {
+            console.log(`Found config at nested path: ${pathNested1}`);
+            targetsPath = pathNested1;
+          } else if (fs.existsSync(pathNested2)) {
+            console.log(`Found config at nested path: ${pathNested2}`);
+            targetsPath = pathNested2;
+          } else if (fs.existsSync(pathRoot1)) {
+            console.log(`Found config at root path: ${pathRoot1}`);
+            targetsPath = pathRoot1;
+          } else if (fs.existsSync(pathRoot2)) {
+            console.log(`Found config at root path: ${pathRoot2}`);
+            targetsPath = pathRoot2;
           } else {
-            // 3. Debugging: If neither exists, list files to help us see what is happening
-            console.log('!!! Error: MACHINES.json not found in expected locations.');
-            console.log(`Checked: ${pathNested}`);
-            console.log(`Checked: ${pathRoot}`);
-            
+            console.log('!!! Error: machine.json / MACHINES.json not found in expected locations.');
+            console.log(`Checked: ${pathNested1}`);
+            console.log(`Checked: ${pathNested2}`);
+            console.log(`Checked: ${pathRoot1}`);
+            console.log(`Checked: ${pathRoot2}`);
+
             console.log('--- Workspace Root Contents ---');
             try {
               console.log(fs.readdirSync(process.env.GITHUB_WORKSPACE));
-            } catch (e) { console.log(e.message); }
+            } catch (e) {
+              console.log(e.message);
+            }
 
-            core.setFailed(`MACHINES.json not found.`);
+            core.setFailed('machine.json not found.');
             return;
           }
 
-          // 4. Parse the file
           let targets;
           try {
             targets = JSON.parse(fs.readFileSync(targetsPath, 'utf-8'));
           } catch (err) {
-            core.setFailed(`Failed to parse MACHINES.json: ${err.message}`);
+            core.setFailed(`Failed to parse machine.json: ${err.message}`);
             return;
           }
 
-          // 5. Generate Outputs
-          const build_matrix = Object.values(targets).map(({ machine, firmware, meta_tar }) => ({ machine, firmware, meta_tar }));
+          const build_matrix = Object.values(targets).map(({
+            machine,
+            firmware,
+            target,
+            meta_tar
+          }) => ({
+            machine,
+            firmware,
+            target,
+            meta_tar
+          }));
           core.setOutput('build_matrix', JSON.stringify(build_matrix));
 
-          const full_matrix = Object.values(targets).map(({ machine, firmware, lavaname, meta_tar }) => ({ machine, firmware, lavaname, meta_tar }));
+          const full_matrix = Object.values(targets).map(({
+            machine,
+            firmware,
+            target,
+            lavaname,
+            firmwareid,
+            buildid,
+            meta_tar
+          }) => ({
+            machine,
+            firmware,
+            target,
+            lavaname,
+            firmwareid,
+            buildid,
+            meta_tar
+          }));
           core.setOutput('full_matrix', JSON.stringify(full_matrix));
