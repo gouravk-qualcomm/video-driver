@@ -29,21 +29,29 @@ jobs:
         include: ${{ fromJson(inputs.build_matrix) }}
 
     steps:
+      # FIX: The pull_docker_image@main composite action was changed upstream to
+      # prepend REGISTRY="", producing "/kmake-image:ver.1.0" which is invalid.
+      # This step checks the local runner cache first (fast path), then falls back
+      # to pulling from GHCR using the org-level secret if not cached.
       - name: Pull Docker image
         shell: bash
         env:
           DOCKER_IMAGE: ${{ inputs.docker_image }}
+          FULL_IMAGE: ghcr.io/qualcomm-linux/${{ inputs.docker_image }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
-          echo "🔐 Logging in to GHCR..."
-          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
-          FULL_IMAGE="ghcr.io/qualcomm-linux/${DOCKER_IMAGE}"
-          echo "🐳 Pulling Docker image: ${FULL_IMAGE}"
-          docker pull "${FULL_IMAGE}"
-          docker tag "${FULL_IMAGE}" "${DOCKER_IMAGE}"
-          echo "✅ Docker image pulled and tagged as ${DOCKER_IMAGE}"
+          # Check if the image is already available on the runner (local cache)
+          if docker image inspect "${DOCKER_IMAGE}" > /dev/null 2>&1; then
+            echo "✅ Docker image '${DOCKER_IMAGE}' found in local runner cache. Skipping pull."
+          else
+            echo "📦 Image not in local cache. Pulling from GHCR: ${FULL_IMAGE}"
+            echo "${GH_TOKEN}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
+            docker pull "${FULL_IMAGE}"
+            docker tag "${FULL_IMAGE}" "${DOCKER_IMAGE}"
+            echo "✅ Docker image pulled and tagged as ${DOCKER_IMAGE}"
+          fi
 
       - name: Checkout Video Driver
         uses: actions/checkout@v4
@@ -208,6 +216,7 @@ jobs:
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
 
           sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
+
           sudo mount -o loop "$EFI_BIN" "$WORKSPACE/efi_mount/$MACHINE"
 
           export UKI_SRC="$(find "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux" -name "*.efi" | head -1)"
@@ -374,6 +383,7 @@ jobs:
           rm -rf "$ws/efi_rebuild" || true
           rm -rf "$ws/efi_mount" || true
           rm -f "$ws/ukify.py" || true
+          rm -f "$ws/new_dtb.bin" || true
 
       - name: Update summary
         if: success() || failure()
