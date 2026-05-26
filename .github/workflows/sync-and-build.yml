@@ -8,7 +8,8 @@ on:
         description: Docker image to use for the build
         required: false
         type: string
-        default: kmake-image:ver.1.0
+        # FIX: Added full registry path to prevent "invalid reference format" error
+        default: ghcr.io/qualcomm-linux/kmake-image:ver.1.0
       build_matrix:
         description: Build matrix for multi target builds
         type: string
@@ -53,7 +54,7 @@ jobs:
         id: build_workspace
         uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
         with:
-          docker_image: kmake-image:ver.1.0
+          docker_image: ${{ inputs.docker_image }}
           workspace_path: ${{ github.workspace }}
 
       - name: Fix Workspace Ownership
@@ -161,14 +162,10 @@ jobs:
           META_DIR="$WORKSPACE/meta_dir/$MACHINE"
           EFI_BIN="$(find "$META_DIR" -name "efi.bin" | head -1)"
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-          KERNEL_IMG="$WORKSPACE/kobj/arch/arm64/boot/Image"
           TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
 
-          [ -f "$EFI_BIN" ] || { echo "❌ efi.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "❌ DTB not found"; exit 1; }
-
-          # FIX: Ensure kernel image is 64KB aligned to resolve UEFI "FIRMWARE BUG" warning
-          truncate -s %64K "$KERNEL_IMG"
+          # FIX: Align kernel image to 64K to resolve "FIRMWARE BUG" seen in logs
+          truncate -s %64K "$WORKSPACE/kobj/arch/arm64/boot/Image"
 
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
           sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
@@ -179,14 +176,16 @@ jobs:
 
           python3 << 'EOF'
           import os, pefile, struct
-          pe = pefile.PE(os.environ["UKI_SRC"])
-          with open(os.environ["UKI_SRC"], "rb") as f: raw = bytearray(f.read())
+          uki_path = os.environ["UKI_SRC"]
+          rebuild_dir = os.environ["REBUILD_DIR"]
+          pe = pefile.PE(uki_path)
+          with open(uki_path, "rb") as f: raw = bytearray(f.read())
           for sec in pe.sections:
               name = sec.Name.decode().rstrip("\x00")
               if name == ".initrd":
-                  with open(os.path.join(os.environ["REBUILD_DIR"], "initrd.img"), "wb") as f: f.write(sec.get_data())
+                  with open(os.path.join(rebuild_dir, "initrd.img"), "wb") as f: f.write(sec.get_data())
               elif name == ".cmdline":
-                  with open(os.path.join(os.environ["REBUILD_DIR"], "cmdline.txt"), "wb") as f: f.write(sec.get_data().rstrip(b"\x00"))
+                  with open(os.path.join(rebuild_dir, "cmdline.txt"), "wb") as f: f.write(sec.get_data().rstrip(b"\x00"))
           keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
           stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
           stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
@@ -201,16 +200,15 @@ jobs:
                   entry_off = sec_table_off + (i * 40)
                   if entry_off + 40 <= len(new_raw): new_raw[entry_off:entry_off+40] = b"\x00" * 40
           size_of_image_off = pe_off + 4 + 20 + 56
-          new_size = ((stub_end + 0xFFF) & ~0xFFF)
-          struct.pack_into("<I", new_raw, size_of_image_off, new_size)
-          with open(os.path.join(os.environ["REBUILD_DIR"], "stub.efi"), "wb") as f: f.write(new_raw)
+          struct.pack_into("<I", new_raw, size_of_image_off, ((stub_end + 0xFFF) & ~0xFFF))
+          with open(os.path.join(rebuild_dir, "stub.efi"), "wb") as f: f.write(new_raw)
           EOF
 
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt")"
           NEW_CMD="$ORIG_CMD rootdelay=10 rootwait"
 
           python3 "$WORKSPACE/ukify.py" build \
-            --linux "$KERNEL_IMG" \
+            --linux "$WORKSPACE/kobj/arch/arm64/boot/Image" \
             --initrd "$TMP_EFI/initrd.img" \
             --cmdline "$NEW_CMD" \
             --devicetree "$DTB_SRC" \
@@ -231,15 +229,12 @@ jobs:
           set -euo pipefail
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-
           [ -f "$DTB_BIN" ] || { echo "❌ dtb.bin not found"; exit 1; }
 
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096 status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" >/dev/null
-          
-          # FIX: UEFI specifically looks for "combined-dtb.dtb" on the Ride platform
+          # FIX: Rename to combined-dtb.dtb so UEFI finds it (based on logs)
           mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" ::combined-dtb.dtb
-          
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
 
       - name: Repack updated meta tar
@@ -278,11 +273,12 @@ jobs:
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          # Ensure all loop mounts are cleared to prevent "device busy" on next run
+          # FIX: Ensure all loop devices are unmounted to prevent runner lockups
           sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
-          sudo umount "$WORKSPACE/efi_mount/"* 2>/dev/null || true
+          sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
           rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/downloads" "$WORKSPACE/kobj" "$WORKSPACE/meta_dir" "$WORKSPACE/output" "$WORKSPACE/rootfs_mount" "$WORKSPACE/efi_rebuild" "$WORKSPACE/efi_mount" "$WORKSPACE/ukify.py" || true
 
       - name: Update summary
@@ -295,4 +291,7 @@ jobs:
         run: |
           set -euo pipefail
           [ "$BUILD_STATUS" = "success" ] && summary=":heavy_check_mark: Build Success" || summary=":x: Build Failed"
-          echo "<details><summary><i>Build Summary</i></summary>$summary<br>- Machine: $MACHINE<br>- Meta tar: $META_TAR</details>" >> "$GITHUB_STEP_SUMMARY"
+          echo "<details><summary><i>Build Summary ($MACHINE)</i></summary>" >> "$GITHUB_STEP_SUMMARY"
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Meta tar: $META_TAR" >> "$GITHUB_STEP_SUMMARY"
+          echo "</details>" >> "$GITHUB_STEP_SUMMARY"
