@@ -29,25 +29,21 @@ jobs:
         include: ${{ fromJson(inputs.build_matrix) }}
 
     steps:
-      # FIX: Login to GHCR first, then pull using fully qualified image name.
-      # The composite action pull_docker_image@main was changed to prepend
-      # REGISTRY="", producing "/kmake-image:ver.1.0" which is invalid.
-      # The image lives on GHCR, not Docker Hub, so login is required.
       - name: Pull Docker image
         shell: bash
         env:
-          DOCKER_IMAGE: ghcr.io/qualcomm-linux/${{ inputs.docker_image }}
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
           echo "🔐 Logging in to GHCR..."
           echo "${GH_TOKEN}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
-          echo "🐳 Pulling Docker image: ${DOCKER_IMAGE}"
-          docker pull "${DOCKER_IMAGE}"
-          # Tag with short name so downstream steps using kmake-image:ver.1.0 still work
-          docker tag "${DOCKER_IMAGE}" "${{ inputs.docker_image }}"
-          echo "✅ Docker image pulled and tagged successfully."
+          FULL_IMAGE="ghcr.io/qualcomm-linux/${DOCKER_IMAGE}"
+          echo "🐳 Pulling Docker image: ${FULL_IMAGE}"
+          docker pull "${FULL_IMAGE}"
+          docker tag "${FULL_IMAGE}" "${DOCKER_IMAGE}"
+          echo "✅ Docker image pulled and tagged as ${DOCKER_IMAGE}"
 
       - name: Checkout Video Driver
         uses: actions/checkout@v4
@@ -118,7 +114,6 @@ jobs:
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-
           [ -n "$META_TAR" ] || { echo "❌ meta_tar is empty for this matrix entry"; exit 1; }
 
           mkdir -p "$WORKSPACE/downloads"
@@ -213,7 +208,6 @@ jobs:
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
 
           sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
-
           sudo mount -o loop "$EFI_BIN" "$WORKSPACE/efi_mount/$MACHINE"
 
           export UKI_SRC="$(find "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux" -name "*.efi" | head -1)"
@@ -370,7 +364,7 @@ jobs:
           set -euo pipefail
           ws="$WORKSPACE"
           sudo umount "$ws/rootfs_mount" 2>/dev/null || true
-          sudo umount "$ws/efi_mount/$MACHINE" 2>/dev/null || true
+          sudo umount "$ws/efi_mount/${{ matrix.machine }}" 2>/dev/null || true
           rm -rf "$ws/artifacts" || true
           rm -rf "$ws/downloads" || true
           rm -rf "$ws/kobj" || true
@@ -380,8 +374,6 @@ jobs:
           rm -rf "$ws/efi_rebuild" || true
           rm -rf "$ws/efi_mount" || true
           rm -f "$ws/ukify.py" || true
-        env:
-          MACHINE: ${{ matrix.machine }}
 
       - name: Update summary
         if: success() || failure()
