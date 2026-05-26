@@ -8,7 +8,6 @@ on:
         description: Docker image to use for the build
         required: false
         type: string
-        # FIX: Full path prevents the "invalid reference format" (leading slash) error
         default: ghcr.io/qualcomm-linux/kmake-image:ver.1.0
       build_matrix:
         description: Build matrix for multi target builds
@@ -30,11 +29,16 @@ jobs:
         include: ${{ fromJson(inputs.build_matrix) }}
 
     steps:
+      # FIX: Replaced pull_docker_image composite action with a direct docker pull
+      # to avoid the composite action prepending an empty REGISTRY causing "/image:tag"
       - name: Pull Docker image
-        uses: qualcomm-linux/kernel-config/.github/actions/pull_docker_image@main
-        with:
-          # FIX: Always uses the fully qualified image name passed from pre_merge.yml
-          image: ${{ inputs.docker_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🐳 Pulling Docker image: ${{ inputs.docker_image }}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull "${{ inputs.docker_image }}"
+          echo "✅ Docker image pulled successfully."
 
       - name: Checkout Video Driver
         uses: actions/checkout@v4
@@ -55,7 +59,6 @@ jobs:
         id: build_workspace
         uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
         with:
-          # FIX: Use input variable consistently — never hardcode the short image name
           docker_image: ${{ inputs.docker_image }}
           workspace_path: ${{ github.workspace }}
 
@@ -200,8 +203,6 @@ jobs:
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
 
           sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
-
-          # Mount original efi.bin
           sudo mount -o loop "$EFI_BIN" "$WORKSPACE/efi_mount/$MACHINE"
 
           export UKI_SRC="$(find "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux" -name "*.efi" | head -1)"
@@ -221,7 +222,6 @@ jobs:
           with open(uki_path, "rb") as f:
               raw = bytearray(f.read())
 
-          # Extract initrd and cmdline
           for sec in pe.sections:
               name = sec.Name.decode().rstrip("\x00")
               if name == ".initrd":
@@ -231,7 +231,6 @@ jobs:
                   with open(os.path.join(rebuild_dir, "cmdline.txt"), "wb") as f:
                       f.write(sec.get_data().rstrip(b"\x00"))
 
-          # Create a clean stub
           keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
           stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
           if not stub_sections:
@@ -254,7 +253,6 @@ jobs:
                   if entry_off + 40 <= len(new_raw):
                       new_raw[entry_off:entry_off+40] = b"\x00" * 40
 
-          # Update SizeOfImage
           size_of_image_off = pe_off + 4 + 20 + 56
           new_size = ((stub_end + 0xFFF) & ~0xFFF)
           struct.pack_into("<I", new_raw, size_of_image_off, new_size)
@@ -364,6 +362,42 @@ jobs:
         run: |
           set -euo pipefail
           ws="$WORKSPACE"
-          # FIX: Ensure mounts are released before cleanup to avoid "Device busy" on next run
+          # FIX: Unmount any lingering mounts before cleanup to avoid "Device busy" on next run
           sudo umount "$ws/rootfs_mount" 2>/dev/null || true
-          
+          sudo umount "$ws/efi_mount/${{ matrix.machine }}" 2>/dev/null || true
+          rm -rf "$ws/artifacts" || true
+          rm -rf "$ws/downloads" || true
+          rm -rf "$ws/kobj" || true
+          rm -rf "$ws/meta_dir" || true
+          rm -rf "$ws/output" || true
+          rm -rf "$ws/rootfs_mount" || true
+          rm -rf "$ws/efi_rebuild" || true
+          rm -rf "$ws/efi_mount" || true
+          rm -f "$ws/ukify.py" || true
+          rm -f "$ws/new_dtb.bin" || true
+
+      - name: Update summary
+        if: success() || failure()
+        shell: bash
+        env:
+          BUILD_STATUS: ${{ steps.build_workspace.outcome }}
+          WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
+          META_TAR: ${{ matrix.meta_tar }}
+        run: |
+          set -euo pipefail
+
+          if [ "$BUILD_STATUS" = "success" ]; then
+            summary=":heavy_check_mark: Build Success"
+          else
+            summary=":x: Build Failed"
+          fi
+
+          {
+            echo "<details><summary><i>Build Summary</i></summary>"
+            echo "$summary"
+            echo ""
+            echo "- Machine: $MACHINE"
+            echo "- Meta tar: $META_TAR"
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
