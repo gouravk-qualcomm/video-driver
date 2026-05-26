@@ -29,18 +29,25 @@ jobs:
         include: ${{ fromJson(inputs.build_matrix) }}
 
     steps:
-      # FIX: Replaced composite action with direct docker pull.
-      # The pull_docker_image@main action was recently updated to prepend
+      # FIX: Login to GHCR first, then pull using fully qualified image name.
+      # The composite action pull_docker_image@main was changed to prepend
       # REGISTRY="", producing "/kmake-image:ver.1.0" which is invalid.
+      # The image lives on GHCR, not Docker Hub, so login is required.
       - name: Pull Docker image
         shell: bash
         env:
-          DOCKER_IMAGE: ${{ inputs.docker_image }}
+          DOCKER_IMAGE: ghcr.io/qualcomm-linux/${{ inputs.docker_image }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
+          echo "🔐 Logging in to GHCR..."
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
           echo "🐳 Pulling Docker image: ${DOCKER_IMAGE}"
           docker pull "${DOCKER_IMAGE}"
-          echo "✅ Docker image pulled successfully."
+          # Tag with short name so downstream steps using kmake-image:ver.1.0 still work
+          docker tag "${DOCKER_IMAGE}" "${{ inputs.docker_image }}"
+          echo "✅ Docker image pulled and tagged successfully."
 
       - name: Checkout Video Driver
         uses: actions/checkout@v4
@@ -206,6 +213,7 @@ jobs:
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
 
           sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
+
           sudo mount -o loop "$EFI_BIN" "$WORKSPACE/efi_mount/$MACHINE"
 
           export UKI_SRC="$(find "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux" -name "*.efi" | head -1)"
@@ -372,6 +380,8 @@ jobs:
           rm -rf "$ws/efi_rebuild" || true
           rm -rf "$ws/efi_mount" || true
           rm -f "$ws/ukify.py" || true
+        env:
+          MACHINE: ${{ matrix.machine }}
 
       - name: Update summary
         if: success() || failure()
