@@ -8,7 +8,7 @@ on:
         description: Docker image to use for the build
         required: false
         type: string
-        default: ghcr.io/qualcomm-linux/kmake-image:ver.1.0
+        default: kmake-image:ver.1.0
       build_matrix:
         description: Build matrix for multi target builds
         type: string
@@ -29,15 +29,17 @@ jobs:
         include: ${{ fromJson(inputs.build_matrix) }}
 
     steps:
-      # FIX: Replaced pull_docker_image composite action with a direct docker pull
-      # to avoid the composite action prepending an empty REGISTRY causing "/image:tag"
+      # FIX: Replaced composite action with direct docker pull.
+      # The pull_docker_image@main action was recently updated to prepend
+      # REGISTRY="", producing "/kmake-image:ver.1.0" which is invalid.
       - name: Pull Docker image
         shell: bash
+        env:
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
         run: |
           set -euo pipefail
-          echo "🐳 Pulling Docker image: ${{ inputs.docker_image }}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker pull "${{ inputs.docker_image }}"
+          echo "🐳 Pulling Docker image: ${DOCKER_IMAGE}"
+          docker pull "${DOCKER_IMAGE}"
           echo "✅ Docker image pulled successfully."
 
       - name: Checkout Video Driver
@@ -59,7 +61,7 @@ jobs:
         id: build_workspace
         uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
         with:
-          docker_image: ${{ inputs.docker_image }}
+          docker_image: kmake-image:ver.1.0
           workspace_path: ${{ github.workspace }}
 
       - name: Fix Workspace Ownership
@@ -109,6 +111,7 @@ jobs:
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
+
           [ -n "$META_TAR" ] || { echo "❌ meta_tar is empty for this matrix entry"; exit 1; }
 
           mkdir -p "$WORKSPACE/downloads"
@@ -264,9 +267,6 @@ jobs:
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt")"
           NEW_CMD="$ORIG_CMD rootdelay=10 rootwait"
 
-          # FIX: Force 64KB alignment on kernel image before UKI build
-          truncate -s %64K "$WORKSPACE/kobj/arch/arm64/boot/Image"
-
           python3 "$WORKSPACE/ukify.py" build \
             --linux "$WORKSPACE/kobj/arch/arm64/boot/Image" \
             --initrd "$TMP_EFI/initrd.img" \
@@ -299,8 +299,7 @@ jobs:
 
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096 status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" >/dev/null
-          # FIX: Renamed to combined-dtb.dtb to match UEFI search order from boot logs
-          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" ::combined-dtb.dtb
+          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" ::
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
           echo "✅ dtb.bin updated"
           ls -lh "$DTB_BIN"
@@ -362,9 +361,8 @@ jobs:
         run: |
           set -euo pipefail
           ws="$WORKSPACE"
-          # FIX: Unmount any lingering mounts before cleanup to avoid "Device busy" on next run
           sudo umount "$ws/rootfs_mount" 2>/dev/null || true
-          sudo umount "$ws/efi_mount/${{ matrix.machine }}" 2>/dev/null || true
+          sudo umount "$ws/efi_mount/$MACHINE" 2>/dev/null || true
           rm -rf "$ws/artifacts" || true
           rm -rf "$ws/downloads" || true
           rm -rf "$ws/kobj" || true
@@ -374,7 +372,6 @@ jobs:
           rm -rf "$ws/efi_rebuild" || true
           rm -rf "$ws/efi_mount" || true
           rm -f "$ws/ukify.py" || true
-          rm -f "$ws/new_dtb.bin" || true
 
       - name: Update summary
         if: success() || failure()
