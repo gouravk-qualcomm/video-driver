@@ -9,7 +9,7 @@ on:
         required: false
         type: string
         # FIX: Full path prevents the "invalid reference format" (leading slash) error
-        default: ghcr.io/qualcomm-linux/kmake-image:ver.1.0
+        default: kmake-image:ver.1.0
       build_matrix:
         description: Build matrix for multi target builds
         type: string
