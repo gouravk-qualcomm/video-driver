@@ -8,7 +8,7 @@ on:
         description: Docker image to use for the build
         required: false
         type: string
-        # FIX: Added full registry path to prevent "invalid reference format" error
+        # FIX 1: Use fully qualified name to avoid "invalid reference format" error
         default: ghcr.io/qualcomm-linux/kmake-image:ver.1.0
       build_matrix:
         description: Build matrix for multi target builds
@@ -130,12 +130,16 @@ jobs:
 
           KVER="$(ls "$WORKSPACE/rootfs_mount/lib/modules/" | head -1)"
           sudo mkdir -p "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates"
-          sudo cp "$WORKSPACE/video-driver/video/iris_vpu.ko" "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates/"
+          sudo cp "$WORKSPACE/video-driver/video/iris_vpu.ko" \
+            "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates/"
 
           sudo mkdir -p "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware"
-          sudo cp "$WORKSPACE/downloads/iris_test_app/iris_v4l2_test" "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
-          sudo cp "$WORKSPACE/downloads/vpu20_1v.mbn" "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware/"
-          sudo cp "$WORKSPACE/downloads/video_clips_iris.tar.gz" "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
+          sudo cp "$WORKSPACE/downloads/iris_test_app/iris_v4l2_test" \
+            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
+          sudo cp "$WORKSPACE/downloads/vpu20_1v.mbn" \
+            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware/"
+          sudo cp "$WORKSPACE/downloads/video_clips_iris.tar.gz" \
+            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
 
           sudo chmod +x "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/iris_v4l2_test"
           sudo depmod -b "$WORKSPACE/rootfs_mount" "$KVER" || true
@@ -149,7 +153,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --user -q pefile
-          curl -fsSL -o "$WORKSPACE/ukify.py" "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
+          curl -fsSL -o "$WORKSPACE/ukify.py" \
+            "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
           chmod +x "$WORKSPACE/ukify.py"
 
       - name: Rebuild efi.bin (UKI + rootdelay fix)
@@ -164,7 +169,7 @@ jobs:
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
 
-          # FIX: Align kernel image to 64K to resolve "FIRMWARE BUG" seen in logs
+          # FIX 2: Align Kernel Image to 64KB to resolve UEFI alignment warning
           truncate -s %64K "$WORKSPACE/kobj/arch/arm64/boot/Image"
 
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
@@ -179,13 +184,16 @@ jobs:
           uki_path = os.environ["UKI_SRC"]
           rebuild_dir = os.environ["REBUILD_DIR"]
           pe = pefile.PE(uki_path)
-          with open(uki_path, "rb") as f: raw = bytearray(f.read())
+          with open(uki_path, "rb") as f:
+              raw = bytearray(f.read())
           for sec in pe.sections:
               name = sec.Name.decode().rstrip("\x00")
               if name == ".initrd":
-                  with open(os.path.join(rebuild_dir, "initrd.img"), "wb") as f: f.write(sec.get_data())
+                  with open(os.path.join(rebuild_dir, "initrd.img"), "wb") as f:
+                      f.write(sec.get_data())
               elif name == ".cmdline":
-                  with open(os.path.join(rebuild_dir, "cmdline.txt"), "wb") as f: f.write(sec.get_data().rstrip(b"\x00"))
+                  with open(os.path.join(rebuild_dir, "cmdline.txt"), "wb") as f:
+                      f.write(sec.get_data().rstrip(b"\x00"))
           keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
           stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
           stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
@@ -200,8 +208,10 @@ jobs:
                   entry_off = sec_table_off + (i * 40)
                   if entry_off + 40 <= len(new_raw): new_raw[entry_off:entry_off+40] = b"\x00" * 40
           size_of_image_off = pe_off + 4 + 20 + 56
-          struct.pack_into("<I", new_raw, size_of_image_off, ((stub_end + 0xFFF) & ~0xFFF))
-          with open(os.path.join(rebuild_dir, "stub.efi"), "wb") as f: f.write(new_raw)
+          new_size = ((stub_end + 0xFFF) & ~0xFFF)
+          struct.pack_into("<I", new_raw, size_of_image_off, new_size)
+          with open(os.path.join(rebuild_dir, "stub.efi"), "wb") as f:
+              f.write(new_raw)
           EOF
 
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt")"
@@ -215,8 +225,7 @@ jobs:
             --stub "$TMP_EFI/stub.efi" \
             --output "$TMP_EFI/new_uki.efi"
 
-          UKI_NAME="$(basename "$UKI_SRC")"
-          sudo cp -fv "$TMP_EFI/new_uki.efi" "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux/$UKI_NAME"
+          sudo cp -fv "$TMP_EFI/new_uki.efi" "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux/$(basename "$UKI_SRC")"
           sync
           sudo umount "$WORKSPACE/efi_mount/$MACHINE"
 
@@ -229,11 +238,10 @@ jobs:
           set -euo pipefail
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-          [ -f "$DTB_BIN" ] || { echo "❌ dtb.bin not found"; exit 1; }
 
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096 status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" >/dev/null
-          # FIX: Rename to combined-dtb.dtb so UEFI finds it (based on logs)
+          # FIX 3: Rename to combined-dtb.dtb so UEFI can find it
           mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" ::combined-dtb.dtb
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
 
@@ -250,22 +258,12 @@ jobs:
           mkdir -p "$OUTDIR"
           tar -C "$META_DIR" -cf "$OUTDIR/$META_TAR" .
 
-      - name: Append artifacts to S3 upload list
-        shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
-          META_TAR: ${{ matrix.meta_tar }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$WORKSPACE/artifacts"
-          echo "$WORKSPACE/output/$META_TAR" >> "$WORKSPACE/artifacts/file_list.txt"
-
       - name: Upload updated meta to S3
         uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinuxmain.root
         with:
           s3_bucket: qli-prd-video-gh-artifacts
-          local_file: ${{ github.workspace }}/artifacts/file_list.txt
-          mode: multi-upload
+          local_file: ${{ github.workspace }}/output/${{ matrix.meta_tar }}
+          mode: upload
           upload_location: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Clean up
@@ -276,22 +274,6 @@ jobs:
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          # FIX: Ensure all loop devices are unmounted to prevent runner lockups
           sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
           sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
-          rm -rf "$WORKSPACE/artifacts" "$WORKSPACE/downloads" "$WORKSPACE/kobj" "$WORKSPACE/meta_dir" "$WORKSPACE/output" "$WORKSPACE/rootfs_mount" "$WORKSPACE/efi_rebuild" "$WORKSPACE/efi_mount" "$WORKSPACE/ukify.py" || true
-
-      - name: Update summary
-        if: success() || failure()
-        shell: bash
-        env:
-          BUILD_STATUS: ${{ steps.build_workspace.outcome }}
-          MACHINE: ${{ matrix.machine }}
-          META_TAR: ${{ matrix.meta_tar }}
-        run: |
-          set -euo pipefail
-          [ "$BUILD_STATUS" = "success" ] && summary=":heavy_check_mark: Build Success" || summary=":x: Build Failed"
-          echo "<details><summary><i>Build Summary ($MACHINE)</i></summary>" >> "$GITHUB_STEP_SUMMARY"
-          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Meta tar: $META_TAR" >> "$GITHUB_STEP_SUMMARY"
-          echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          rm -rf "$WORKSPACE/meta_dir" "$WORKSPACE/output" "$WORKSPACE/downloads"
