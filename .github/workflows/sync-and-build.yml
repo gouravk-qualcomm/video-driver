@@ -29,22 +29,16 @@ jobs:
         include: ${{ fromJson(inputs.build_matrix) }}
 
     steps:
-      # FIX: The pull_docker_image@main composite action was changed upstream to
-      # prepend REGISTRY="", producing "/kmake-image:ver.1.0" which is invalid.
-      # This step checks the local runner cache first (fast path), then falls back
-      # to pulling from GHCR using the org-level secret if not cached.
       - name: Pull Docker image
         shell: bash
         env:
           DOCKER_IMAGE: ${{ inputs.docker_image }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}    # 👈 PAT with read:packages scope
           GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
-          # Derive a short local tag from the full image reference
           SHORT_TAG="$(basename "${DOCKER_IMAGE}")"
 
-          # Check if the image is already available on the runner (local cache)
           if docker image inspect "${SHORT_TAG}" > /dev/null 2>&1; then
             echo "✅ Docker image '${SHORT_TAG}' found in local runner cache. Skipping pull."
           else
