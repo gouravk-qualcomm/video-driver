@@ -8,7 +8,7 @@ on:
         description: Docker image to use for the build
         required: false
         type: string
-        default: kmake-image:ver.1.0
+        default: ghcr.io/qualcomm-linux/kmake-image:ver.1.0
       build_matrix:
         description: Build matrix for multi target builds
         type: string
@@ -37,20 +37,22 @@ jobs:
         shell: bash
         env:
           DOCKER_IMAGE: ${{ inputs.docker_image }}
-          FULL_IMAGE: ghcr.io/qualcomm-linux/${{ inputs.docker_image }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
+          # Derive a short local tag from the full image reference
+          SHORT_TAG="$(basename "${DOCKER_IMAGE}")"
+
           # Check if the image is already available on the runner (local cache)
-          if docker image inspect "${DOCKER_IMAGE}" > /dev/null 2>&1; then
-            echo "✅ Docker image '${DOCKER_IMAGE}' found in local runner cache. Skipping pull."
+          if docker image inspect "${SHORT_TAG}" > /dev/null 2>&1; then
+            echo "✅ Docker image '${SHORT_TAG}' found in local runner cache. Skipping pull."
           else
-            echo "📦 Image not in local cache. Pulling from GHCR: ${FULL_IMAGE}"
+            echo "📦 Image not in local cache. Pulling from GHCR: ${DOCKER_IMAGE}"
             echo "${GH_TOKEN}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
-            docker pull "${FULL_IMAGE}"
-            docker tag "${FULL_IMAGE}" "${DOCKER_IMAGE}"
-            echo "✅ Docker image pulled and tagged as ${DOCKER_IMAGE}"
+            docker pull "${DOCKER_IMAGE}"
+            docker tag "${DOCKER_IMAGE}" "${SHORT_TAG}"
+            echo "✅ Docker image pulled and tagged as ${SHORT_TAG}"
           fi
 
       - name: Checkout Video Driver
