@@ -33,7 +33,7 @@ jobs:
         shell: bash
         env:
           DOCKER_IMAGE: ${{ inputs.docker_image }}
-          GH_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}    # 👈 PAT with read:packages scope
+          GH_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
           GH_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
