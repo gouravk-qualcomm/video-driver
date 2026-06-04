@@ -64,7 +64,7 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          echo "🔧 Fixing file ownership (root -> runner user)..."
+          echo "Fixing file ownership (root -> runner user)..."
           sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE"
 
       - name: Install helper tools
@@ -104,12 +104,12 @@ jobs:
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          [ -n "$META_TAR" ] || { echo "❌ meta_tar is empty for this matrix entry"; exit 1; }
+          [ -n "$META_TAR" ] || { echo "meta_tar is empty for this matrix entry"; exit 1; }
 
           mkdir -p "$WORKSPACE/downloads"
           mkdir -p "$WORKSPACE/meta_dir"
 
-          echo "📥 Downloading meta tar: $META_TAR"
+          echo "Downloading meta tar: $META_TAR"
           aws s3 cp \
             "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" \
             "$WORKSPACE/downloads/$META_TAR"
@@ -117,10 +117,10 @@ jobs:
           rm -rf "$WORKSPACE/meta_dir/$MACHINE"
           mkdir -p "$WORKSPACE/meta_dir/$MACHINE"
 
-          echo "📦 Extracting meta tar into: $WORKSPACE/meta_dir/$MACHINE"
+          echo "Extracting meta tar into: $WORKSPACE/meta_dir/$MACHINE"
           tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$WORKSPACE/meta_dir/$MACHINE"
 
-          echo "✅ Extracted meta contents:"
+          echo "Extracted meta contents:"
           find "$WORKSPACE/meta_dir/$MACHINE" -maxdepth 2 -type f | sort | head -100
 
       - name: Mount rootfs and inject artifacts
@@ -134,17 +134,17 @@ jobs:
           META_DIR="$WORKSPACE/meta_dir/$MACHINE"
           ROOTFS_IMG="$(find "$META_DIR" -name "rootfs.img" | head -1)"
 
-          [ -f "$ROOTFS_IMG" ] || { echo "❌ rootfs.img not found under $META_DIR"; exit 1; }
+          [ -f "$ROOTFS_IMG" ] || { echo "rootfs.img not found under $META_DIR"; exit 1; }
 
-          echo "📌 Using rootfs image: $ROOTFS_IMG"
+          echo "Using rootfs image: $ROOTFS_IMG"
 
           mkdir -p "$WORKSPACE/rootfs_mount"
           sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
           sudo mount -o loop "$ROOTFS_IMG" "$WORKSPACE/rootfs_mount"
 
           KVER="$(ls "$WORKSPACE/rootfs_mount/lib/modules/" | head -1)"
-          [ -n "$KVER" ] || { echo "❌ Could not detect kernel version in rootfs"; exit 1; }
-          echo "📌 Kernel version in rootfs: $KVER"
+          [ -n "$KVER" ] || { echo "Could not detect kernel version in rootfs"; exit 1; }
+          echo "Kernel version in rootfs: $KVER"
 
           sudo mkdir -p "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates"
           sudo cp "$WORKSPACE/video-driver/video/iris_vpu.ko" \
@@ -164,7 +164,7 @@ jobs:
           sync
           sudo umount "$WORKSPACE/rootfs_mount"
 
-          echo "✅ rootfs.img updated"
+          echo "rootfs.img updated"
           ls -lh "$ROOTFS_IMG"
 
       - name: Install EFI build tools
@@ -179,7 +179,7 @@ jobs:
             "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
           chmod +x "$WORKSPACE/ukify.py"
 
-      - name: Rebuild efi.bin (UKI + rootdelay fix)
+      - name: Rebuild efi.bin (UKI + rootdelay fix + 64K alignment)
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -192,17 +192,16 @@ jobs:
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
 
-          [ -f "$EFI_BIN" ] || { echo "❌ efi.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "❌ DTB not found: $DTB_SRC"; exit 1; }
+          [ -f "$EFI_BIN" ] || { echo "efi.bin not found"; exit 1; }
+          [ -f "$DTB_SRC" ] || { echo "DTB not found: $DTB_SRC"; exit 1; }
 
           mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
 
           sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
-
           sudo mount -o loop "$EFI_BIN" "$WORKSPACE/efi_mount/$MACHINE"
 
           export UKI_SRC="$(find "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux" -name "*.efi" | head -1)"
-          [ -f "$UKI_SRC" ] || { echo "❌ Could not find UKI inside efi.bin"; exit 1; }
+          [ -f "$UKI_SRC" ] || { echo "Could not find UKI inside efi.bin"; exit 1; }
 
           export REBUILD_DIR="$TMP_EFI"
 
@@ -257,11 +256,26 @@ jobs:
               f.write(new_raw)
           EOF
 
+          # ── Fix: Align kernel Image to 64K boundary ──────────────────────────
+          # Resolves: EFI stub: FIRMWARE BUG: kernel image not aligned on 64k boundary
+          KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
+          ALIGNED_IMAGE="$TMP_EFI/Image.aligned"
+          cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
+          IMAGE_SIZE=$(stat -c %s "$ALIGNED_IMAGE")
+          ALIGNED_SIZE=$(( (IMAGE_SIZE + 65535) & ~65535 ))
+          if [ "$IMAGE_SIZE" -ne "$ALIGNED_SIZE" ]; then
+            echo "Padding kernel Image from $IMAGE_SIZE to $ALIGNED_SIZE bytes (64K alignment)"
+            truncate -s "$ALIGNED_SIZE" "$ALIGNED_IMAGE"
+          else
+            echo "Kernel Image already 64K aligned ($IMAGE_SIZE bytes)"
+          fi
+          # ─────────────────────────────────────────────────────────────────────
+
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt")"
           NEW_CMD="$ORIG_CMD rootdelay=10 rootwait"
 
           python3 "$WORKSPACE/ukify.py" build \
-            --linux "$WORKSPACE/kobj/arch/arm64/boot/Image" \
+            --linux "$ALIGNED_IMAGE" \
             --initrd "$TMP_EFI/initrd.img" \
             --cmdline "$NEW_CMD" \
             --devicetree "$DTB_SRC" \
@@ -273,7 +287,7 @@ jobs:
           sync
           sudo umount "$WORKSPACE/efi_mount/$MACHINE"
 
-          echo "✅ efi.bin patched"
+          echo "efi.bin patched with aligned kernel and updated UKI"
           ls -lh "$EFI_BIN"
 
       - name: Rebuild dtb.bin
@@ -287,14 +301,18 @@ jobs:
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
 
-          [ -f "$DTB_BIN" ] || { echo "❌ dtb.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "❌ DTB not found: $DTB_SRC"; exit 1; }
+          [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
+          [ -f "$DTB_SRC" ] || { echo "DTB not found: $DTB_SRC"; exit 1; }
 
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096 status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" >/dev/null
-          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" ::
+
+          # Fix: UEFI searches for combined-dtb.dtb by name — rename on copy
+          # Resolves: DtPlatformLoadDtbBlob combined-dtb.dtb load failed
+          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" :::combined-dtb.dtb
+
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
-          echo "✅ dtb.bin updated"
+          echo "dtb.bin updated (DTB stored as combined-dtb.dtb)"
           ls -lh "$DTB_BIN"
 
       - name: Repack updated meta tar
@@ -315,7 +333,7 @@ jobs:
 
           tar -C "$META_DIR" -cf "$FINAL_TAR" .
 
-          echo "✅ Repacked meta tar:"
+          echo "Repacked meta tar:"
           ls -lh "$FINAL_TAR"
 
       - name: Append artifacts to S3 upload list
@@ -332,10 +350,10 @@ jobs:
           : > "$FILE_LIST"
 
           FINAL_TAR="$WORKSPACE/output/$META_TAR"
-          [ -f "$FINAL_TAR" ] || { echo "❌ Missing final meta tar: $FINAL_TAR"; exit 1; }
+          [ -f "$FINAL_TAR" ] || { echo "Missing final meta tar: $FINAL_TAR"; exit 1; }
 
           echo "$FINAL_TAR" >> "$FILE_LIST"
-          echo "✅ Queued for upload: $FINAL_TAR"
+          echo "Queued for upload: $FINAL_TAR"
           cat "$FILE_LIST"
 
       - name: Upload updated meta to S3
@@ -391,4 +409,4 @@ jobs:
             echo "- Machine: $MACHINE"
             echo "- Meta tar: $META_TAR"
             echo "</details>"
-          } >> "$GITHUB_STEP_SUMMARY" 
+          } >> "$GITHUB_STEP_SUMMARY"
