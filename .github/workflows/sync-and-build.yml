@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y python3-pip mtools dosfstools
+          sudo apt-get install -y python3-pip pefile mtools dosfstools e2tools e2fsprogs
           python3 -m pip install --user -q pefile
 
       - name: Download iris artifacts from S3
@@ -124,7 +124,12 @@ jobs:
           echo "✅ Extracted meta contents:"
           find "$WORKSPACE/meta_dir/$MACHINE" -maxdepth 2 -type f | sort | head -100
 
-      - name: Mount rootfs and inject artifacts
+      # ─────────────────────────────────────────────────────────────────────
+      # Inject artifacts into rootfs.img using debugfs (no loop mount needed)
+      # This avoids ext4 superblock corruption caused by loop devices inside
+      # GitHub Actions container environments.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Inject artifacts into rootfs (debugfs, no loop mount)
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -136,36 +141,67 @@ jobs:
           ROOTFS_IMG="$(find "$META_DIR" -name "rootfs.img" | head -1)"
 
           [ -f "$ROOTFS_IMG" ] || { echo "❌ rootfs.img not found under $META_DIR"; exit 1; }
-
           echo "📌 Using rootfs image: $ROOTFS_IMG"
 
-          mkdir -p "$WORKSPACE/rootfs_mount"
-          sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
-          sudo mount -o loop "$ROOTFS_IMG" "$WORKSPACE/rootfs_mount"
-
-          KVER="$(ls "$WORKSPACE/rootfs_mount/lib/modules/" | head -1)"
-          [ -n "$KVER" ] || { echo "❌ Could not detect kernel version in rootfs"; exit 1; }
+          # ── Detect kernel version from rootfs without mounting ────────────
+          # debugfs: list /lib/modules to find kver
+          KVER="$(debugfs -R 'ls -l /lib/modules' "$ROOTFS_IMG" 2>/dev/null \
+            | awk 'NF && $NF !~ /^\.$|^\.\.$/ { print $NF }' \
+            | grep -v '^$' | head -1)"
+          [ -n "$KVER" ] || { echo "❌ Could not detect kernel version in rootfs via debugfs"; exit 1; }
           echo "📌 Kernel version in rootfs: $KVER"
 
-          sudo mkdir -p "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates"
-          sudo cp "$WORKSPACE/video-driver/video/iris_vpu.ko" \
-            "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates/"
+          # ── Helper: create directory tree inside ext4 image ──────────────
+          debugfs_mkdir() {
+            local img="$1"
+            local dir="$2"
+            # Build path component by component so parent dirs exist first
+            local parts
+            IFS='/' read -ra parts <<< "${dir#/}"
+            local cur=""
+            for part in "${parts[@]}"; do
+              [ -z "$part" ] && continue
+              cur="$cur/$part"
+              debugfs -w -R "mkdir ${cur}" "$img" 2>/dev/null || true
+            done
+          }
 
-          sudo mkdir -p "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware"
-          sudo cp "$WORKSPACE/downloads/iris_test_app/iris_v4l2_test" \
-            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
-          sudo cp "$WORKSPACE/downloads/vpu20_1v.mbn" \
-            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/firmware/"
-          sudo cp "$WORKSPACE/downloads/video_clips_iris.tar.gz" \
-            "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/"
+          # ── Create required directories ───────────────────────────────────
+          debugfs_mkdir "$ROOTFS_IMG" "/lib/modules/$KVER/updates"
+          debugfs_mkdir "$ROOTFS_IMG" "/data/vendor/iris_test_app/firmware"
 
-          sudo chmod +x "$WORKSPACE/rootfs_mount/data/vendor/iris_test_app/iris_v4l2_test"
+          # ── Copy iris_vpu.ko ──────────────────────────────────────────────
+          debugfs -w -R \
+            "write $WORKSPACE/video-driver/video/iris_vpu.ko /lib/modules/$KVER/updates/iris_vpu.ko" \
+            "$ROOTFS_IMG"
+          echo "✅ iris_vpu.ko written"
 
-          sudo depmod -b "$WORKSPACE/rootfs_mount" "$KVER" || true
-          sync
-          sudo umount "$WORKSPACE/rootfs_mount"
+          # ── Copy iris_v4l2_test binary ────────────────────────────────────
+          debugfs -w -R \
+            "write $WORKSPACE/downloads/iris_test_app/iris_v4l2_test /data/vendor/iris_test_app/iris_v4l2_test" \
+            "$ROOTFS_IMG"
+          # Set executable bits (mode 0755 = 0x81ED)
+          debugfs -w -R \
+            "set_inode_field /data/vendor/iris_test_app/iris_v4l2_test mode 0100755" \
+            "$ROOTFS_IMG"
+          echo "✅ iris_v4l2_test written"
 
-          echo "✅ rootfs.img updated"
+          # ── Copy vpu20_1v.mbn firmware ────────────────────────────────────
+          debugfs -w -R \
+            "write $WORKSPACE/downloads/vpu20_1v.mbn /data/vendor/iris_test_app/firmware/vpu20_1v.mbn" \
+            "$ROOTFS_IMG"
+          echo "✅ vpu20_1v.mbn written"
+
+          # ── Copy video clips tarball ──────────────────────────────────────
+          debugfs -w -R \
+            "write $WORKSPACE/downloads/video_clips_iris.tar.gz /data/vendor/iris_test_app/video_clips_iris.tar.gz" \
+            "$ROOTFS_IMG"
+          echo "✅ video_clips_iris.tar.gz written"
+
+          # ── Run e2fsck to ensure image integrity ──────────────────────────
+          e2fsck -p -f "$ROOTFS_IMG" || true
+
+          echo "✅ rootfs.img updated (debugfs, no loop mount)"
           ls -lh "$ROOTFS_IMG"
 
       - name: Install EFI build tools
@@ -179,16 +215,14 @@ jobs:
             "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
           chmod +x "$WORKSPACE/ukify.py"
 
-      - name: Rebuild efi.bin (UKI + 64k alignment + rootdelay fix)
-        # Fix 1: Use mtools (mcopy/mdir) instead of loop mount to read/write the
-        #         FAT filesystem inside efi.bin. Loop mount + umount inside a
-        #         container environment does not reliably flush changes back to the
-        #         image file, leaving the FAT superblock corrupt and causing:
-        #           "EFI GUID based mount skipped ... Status = Not Found"
-        #           "ASSERT QcomBds.c +858: 0"
-        # Fix 2: Align the kernel Image to a 64K boundary before passing it to
-        #         ukify to eliminate:
-        #           "EFI stub: FIRMWARE BUG: kernel image not aligned on 64k boundary"
+      # ─────────────────────────────────────────────────────────────────────
+      # Rebuild efi.bin using mtools only (no loop mount).
+      # Fixes:
+      #   1. EFI stub 64k alignment warning  → truncate Image to 64K boundary
+      #   2. UKI rebuilt with rootdelay=10 rootwait in cmdline
+      # mtools avoids FAT superblock corruption from loop devices in containers.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Rebuild efi.bin (mtools — no loop mount)
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -201,33 +235,24 @@ jobs:
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
 
-          [ -f "$EFI_BIN" ] || { echo "❌ efi.bin not found under $META_DIR"; exit 1; }
+          [ -f "$EFI_BIN" ] || { echo "❌ efi.bin not found"; exit 1; }
           [ -f "$DTB_SRC" ] || { echo "❌ DTB not found: $DTB_SRC"; exit 1; }
 
           mkdir -p "$TMP_EFI"
 
-          # ── Locate the UKI .efi path inside the FAT image using mtools ──────
-          echo "🔍 Listing EFI/Linux contents of efi.bin via mtools..."
-          UKI_FAT_PATH="$(mdir -i "$EFI_BIN" -/ -b ::EFI/Linux 2>/dev/null \
-            | grep -i '\.efi$' | head -1 | sed 's|^::|::|')"
+          # ── Find the UKI .efi path inside the FAT image (no mount) ────────
+          UKI_MTOOLS_PATH="$(mdir -i "$EFI_BIN" -b ::EFI/Linux 2>/dev/null \
+            | grep -i '\.efi$' | awk '{print $NF}' | head -1)"
+          [ -n "$UKI_MTOOLS_PATH" ] || { echo "❌ No .efi found in efi.bin::EFI/Linux"; exit 1; }
+          UKI_NAME="$(basename "$UKI_MTOOLS_PATH")"
+          echo "📌 Found UKI: $UKI_NAME"
 
-          [ -n "$UKI_FAT_PATH" ] || {
-            echo "❌ Could not find a .efi file inside efi.bin at EFI/Linux/"
-            echo "   Contents of efi.bin root:"
-            mdir -i "$EFI_BIN" -/ -b :: || true
-            exit 1
-          }
-          UKI_NAME="$(basename "$UKI_FAT_PATH")"
-          echo "📌 Found UKI inside efi.bin: $UKI_FAT_PATH  (filename: $UKI_NAME)"
+          # ── Extract UKI from FAT image ─────────────────────────────────────
+          mcopy -i "$EFI_BIN" "::EFI/Linux/$UKI_NAME" "$TMP_EFI/original_uki.efi"
 
-          # ── Extract the UKI from the FAT image using mcopy ───────────────────
-          UKI_LOCAL="$TMP_EFI/original_uki.efi"
-          mcopy -i "$EFI_BIN" "$UKI_FAT_PATH" "$UKI_LOCAL"
-          echo "✅ Extracted UKI → $UKI_LOCAL ($(stat -c %s "$UKI_LOCAL") bytes)"
-
-          # ── Parse the UKI: extract initrd, cmdline, stub ─────────────────────
-          export UKI_SRC="$UKI_LOCAL"
+          # ── Extract initrd + cmdline from UKI using pefile ─────────────────
           export REBUILD_DIR="$TMP_EFI"
+          export UKI_SRC="$TMP_EFI/original_uki.efi"
 
           python3 << 'EOF'
           import os
@@ -246,16 +271,14 @@ jobs:
               if name == ".initrd":
                   with open(os.path.join(rebuild_dir, "initrd.img"), "wb") as f:
                       f.write(sec.get_data())
-                  print(f"  extracted .initrd  ({sec.SizeOfRawData} bytes)")
               elif name == ".cmdline":
                   with open(os.path.join(rebuild_dir, "cmdline.txt"), "wb") as f:
                       f.write(sec.get_data().rstrip(b"\x00"))
-                  print(f"  extracted .cmdline ({sec.SizeOfRawData} bytes)")
 
           keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
           stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
           if not stub_sections:
-              raise SystemExit("❌ No stub sections found in UKI")
+              raise SystemExit("No stub sections found")
 
           stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
 
@@ -280,10 +303,9 @@ jobs:
 
           with open(os.path.join(rebuild_dir, "stub.efi"), "wb") as f:
               f.write(new_raw)
-          print(f"  extracted stub.efi ({len(new_raw)} bytes)")
           EOF
 
-          # ── Fix 2: Align kernel Image to 64K boundary ─────────────────────
+          # ── Fix: Align kernel Image to 64K boundary ────────────────────────
           # Eliminates: "EFI stub: FIRMWARE BUG: kernel image not aligned on 64k boundary"
           KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
           ALIGNED_IMAGE="$TMP_EFI/Image.aligned"
@@ -291,44 +313,39 @@ jobs:
           IMAGE_SIZE=$(stat -c %s "$ALIGNED_IMAGE")
           ALIGNED_SIZE=$(( (IMAGE_SIZE + 65535) & ~65535 ))
           if [ "$IMAGE_SIZE" -ne "$ALIGNED_SIZE" ]; then
-            echo "📐 Aligning kernel: $IMAGE_SIZE → $ALIGNED_SIZE bytes (64K boundary)"
+            echo "📐 Padding kernel: $IMAGE_SIZE → $ALIGNED_SIZE bytes (64K alignment)"
             truncate -s "$ALIGNED_SIZE" "$ALIGNED_IMAGE"
           else
-            echo "📐 Kernel already 64K-aligned ($IMAGE_SIZE bytes)"
+            echo "📐 Kernel already 64K aligned ($IMAGE_SIZE bytes)"
           fi
 
-          # ── Append rootdelay to cmdline ───────────────────────────────────
+          # ── Append rootdelay + rootwait to cmdline ─────────────────────────
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt")"
           NEW_CMD="$ORIG_CMD rootdelay=10 rootwait"
-          echo "📝 Cmdline: $NEW_CMD"
+          echo "📝 New cmdline: $NEW_CMD"
 
-          # ── Rebuild UKI with ukify ─────────────────────────────────────────
-          NEW_UKI="$TMP_EFI/new_uki.efi"
+          # ── Build new UKI ──────────────────────────────────────────────────
           python3 "$WORKSPACE/ukify.py" build \
-            --linux    "$ALIGNED_IMAGE" \
-            --initrd   "$TMP_EFI/initrd.img" \
-            --cmdline  "$NEW_CMD" \
+            --linux "$ALIGNED_IMAGE" \
+            --initrd "$TMP_EFI/initrd.img" \
+            --cmdline "$NEW_CMD" \
             --devicetree "$DTB_SRC" \
-            --stub     "$TMP_EFI/stub.efi" \
-            --output   "$NEW_UKI"
-          echo "✅ New UKI built: $(stat -c %s "$NEW_UKI") bytes"
+            --stub "$TMP_EFI/stub.efi" \
+            --output "$TMP_EFI/new_uki.efi"
 
-          # ── Inject new UKI back into efi.bin using mcopy (no loop mount) ──
-          # Delete the old .efi first so mcopy does not fail on overwrite,
-          # then copy the new one in under the same filename.
-          mdel  -i "$EFI_BIN" "$UKI_FAT_PATH" 2>/dev/null || true
-          mcopy -i "$EFI_BIN" "$NEW_UKI" "::EFI/Linux/$UKI_NAME"
-          echo "✅ efi.bin updated via mtools (no loop mount)"
+          # ── Inject new UKI back into FAT image (mtools, no loop mount) ─────
+          mdel  -i "$EFI_BIN" "::EFI/Linux/$UKI_NAME" 2>/dev/null || true
+          mcopy -i "$EFI_BIN" "$TMP_EFI/new_uki.efi" "::EFI/Linux/$UKI_NAME"
 
-          echo "📦 Final efi.bin:"
+          echo "✅ efi.bin patched (mtools)"
           ls -lh "$EFI_BIN"
-          echo "📋 EFI/Linux contents:"
-          mdir -i "$EFI_BIN" ::EFI/Linux
 
-      - name: Rebuild dtb.bin
-        # Fix: mcopy renames the DTB to combined-dtb.dtb inside the FAT image.
-        # UEFI searches by that fixed name; using the machine-specific filename
-        # caused: "DtPlatformLoadDtbBlob combined-dtb.dtb load failed"
+      # ─────────────────────────────────────────────────────────────────────
+      # Rebuild dtb.bin as a fresh VFAT image with the DTB named
+      # combined-dtb.dtb — the exact filename UEFI DtPlatformLoadDtbBlob
+      # searches for.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Rebuild dtb.bin (mtools — combined-dtb.dtb)
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -342,10 +359,12 @@ jobs:
           [ -f "$DTB_BIN" ] || { echo "❌ dtb.bin not found"; exit 1; }
           [ -f "$DTB_SRC" ] || { echo "❌ DTB not found: $DTB_SRC"; exit 1; }
 
+          # Create a fresh 4MB VFAT and copy in DTB as combined-dtb.dtb
+          # Fixes: "DtPlatformLoadDtbBlob combined-dtb.dtb load failed"
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096 status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" >/dev/null
-          # Rename to combined-dtb.dtb so UEFI DtPlatformLoadDtbBlob finds it
           mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" :::combined-dtb.dtb
+
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
           echo "✅ dtb.bin updated (combined-dtb.dtb)"
           ls -lh "$DTB_BIN"
@@ -407,16 +426,14 @@ jobs:
         run: |
           set -euo pipefail
           ws="$WORKSPACE"
-          sudo umount "$ws/rootfs_mount" 2>/dev/null || true
-          rm -rf "$ws/artifacts"   || true
-          rm -rf "$ws/downloads"   || true
-          rm -rf "$ws/kobj"        || true
-          rm -rf "$ws/meta_dir"    || true
-          rm -rf "$ws/output"      || true
-          rm -rf "$ws/rootfs_mount" || true
-          rm -rf "$ws/efi_rebuild" || true
-          rm -f  "$ws/ukify.py"    || true
-          rm -f  "$ws/new_dtb.bin" || true
+          rm -rf "$ws/artifacts"  || true
+          rm -rf "$ws/downloads"  || true
+          rm -rf "$ws/kobj"       || true
+          rm -rf "$ws/meta_dir"   || true
+          rm -rf "$ws/output"     || true
+          rm -rf "$ws/efi_rebuild"|| true
+          rm -f  "$ws/ukify.py"   || true
+          rm -f  "$ws/new_dtb.bin"|| true
 
       - name: Update summary
         if: success() || failure()
