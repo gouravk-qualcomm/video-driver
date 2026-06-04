@@ -64,7 +64,7 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          echo "Fixing file ownership (root -> runner user)..."
+          echo "🔧 Fixing file ownership (root -> runner user)..."
           sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE"
 
       - name: Install helper tools
@@ -73,6 +73,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y python3-pip mtools dosfstools
+          python3 -m pip install --user -q pefile
 
       - name: Download iris artifacts from S3
         shell: bash
@@ -104,12 +105,12 @@ jobs:
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          [ -n "$META_TAR" ] || { echo "meta_tar is empty for this matrix entry"; exit 1; }
+          [ -n "$META_TAR" ] || { echo "❌ meta_tar is empty for this matrix entry"; exit 1; }
 
           mkdir -p "$WORKSPACE/downloads"
           mkdir -p "$WORKSPACE/meta_dir"
 
-          echo "Downloading meta tar: $META_TAR"
+          echo "📥 Downloading meta tar: $META_TAR"
           aws s3 cp \
             "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" \
             "$WORKSPACE/downloads/$META_TAR"
@@ -117,10 +118,10 @@ jobs:
           rm -rf "$WORKSPACE/meta_dir/$MACHINE"
           mkdir -p "$WORKSPACE/meta_dir/$MACHINE"
 
-          echo "Extracting meta tar into: $WORKSPACE/meta_dir/$MACHINE"
+          echo "📦 Extracting meta tar into: $WORKSPACE/meta_dir/$MACHINE"
           tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$WORKSPACE/meta_dir/$MACHINE"
 
-          echo "Extracted meta contents:"
+          echo "✅ Extracted meta contents:"
           find "$WORKSPACE/meta_dir/$MACHINE" -maxdepth 2 -type f | sort | head -100
 
       - name: Mount rootfs and inject artifacts
@@ -134,17 +135,17 @@ jobs:
           META_DIR="$WORKSPACE/meta_dir/$MACHINE"
           ROOTFS_IMG="$(find "$META_DIR" -name "rootfs.img" | head -1)"
 
-          [ -f "$ROOTFS_IMG" ] || { echo "rootfs.img not found under $META_DIR"; exit 1; }
+          [ -f "$ROOTFS_IMG" ] || { echo "❌ rootfs.img not found under $META_DIR"; exit 1; }
 
-          echo "Using rootfs image: $ROOTFS_IMG"
+          echo "📌 Using rootfs image: $ROOTFS_IMG"
 
           mkdir -p "$WORKSPACE/rootfs_mount"
           sudo umount "$WORKSPACE/rootfs_mount" 2>/dev/null || true
           sudo mount -o loop "$ROOTFS_IMG" "$WORKSPACE/rootfs_mount"
 
           KVER="$(ls "$WORKSPACE/rootfs_mount/lib/modules/" | head -1)"
-          [ -n "$KVER" ] || { echo "Could not detect kernel version in rootfs"; exit 1; }
-          echo "Kernel version in rootfs: $KVER"
+          [ -n "$KVER" ] || { echo "❌ Could not detect kernel version in rootfs"; exit 1; }
+          echo "📌 Kernel version in rootfs: $KVER"
 
           sudo mkdir -p "$WORKSPACE/rootfs_mount/lib/modules/$KVER/updates"
           sudo cp "$WORKSPACE/video-driver/video/iris_vpu.ko" \
@@ -164,7 +165,7 @@ jobs:
           sync
           sudo umount "$WORKSPACE/rootfs_mount"
 
-          echo "rootfs.img updated"
+          echo "✅ rootfs.img updated"
           ls -lh "$ROOTFS_IMG"
 
       - name: Install EFI build tools
@@ -173,13 +174,21 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          python3 -m pip install --user -q pefile
           curl -fsSL \
             -o "$WORKSPACE/ukify.py" \
             "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
           chmod +x "$WORKSPACE/ukify.py"
 
-      - name: Rebuild efi.bin (UKI + rootdelay fix + 64K alignment)
+      - name: Rebuild efi.bin (UKI + 64k alignment + rootdelay fix)
+        # Fix 1: Use mtools (mcopy/mdir) instead of loop mount to read/write the
+        #         FAT filesystem inside efi.bin. Loop mount + umount inside a
+        #         container environment does not reliably flush changes back to the
+        #         image file, leaving the FAT superblock corrupt and causing:
+        #           "EFI GUID based mount skipped ... Status = Not Found"
+        #           "ASSERT QcomBds.c +858: 0"
+        # Fix 2: Align the kernel Image to a 64K boundary before passing it to
+        #         ukify to eliminate:
+        #           "EFI stub: FIRMWARE BUG: kernel image not aligned on 64k boundary"
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -192,17 +201,32 @@ jobs:
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
 
-          [ -f "$EFI_BIN" ] || { echo "efi.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "DTB not found: $DTB_SRC"; exit 1; }
+          [ -f "$EFI_BIN" ] || { echo "❌ efi.bin not found under $META_DIR"; exit 1; }
+          [ -f "$DTB_SRC" ] || { echo "❌ DTB not found: $DTB_SRC"; exit 1; }
 
-          mkdir -p "$TMP_EFI" "$WORKSPACE/efi_mount/$MACHINE"
+          mkdir -p "$TMP_EFI"
 
-          sudo umount "$WORKSPACE/efi_mount/$MACHINE" 2>/dev/null || true
-          sudo mount -o loop "$EFI_BIN" "$WORKSPACE/efi_mount/$MACHINE"
+          # ── Locate the UKI .efi path inside the FAT image using mtools ──────
+          echo "🔍 Listing EFI/Linux contents of efi.bin via mtools..."
+          UKI_FAT_PATH="$(mdir -i "$EFI_BIN" -/ -b ::EFI/Linux 2>/dev/null \
+            | grep -i '\.efi$' | head -1 | sed 's|^::|::|')"
 
-          export UKI_SRC="$(find "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux" -name "*.efi" | head -1)"
-          [ -f "$UKI_SRC" ] || { echo "Could not find UKI inside efi.bin"; exit 1; }
+          [ -n "$UKI_FAT_PATH" ] || {
+            echo "❌ Could not find a .efi file inside efi.bin at EFI/Linux/"
+            echo "   Contents of efi.bin root:"
+            mdir -i "$EFI_BIN" -/ -b :: || true
+            exit 1
+          }
+          UKI_NAME="$(basename "$UKI_FAT_PATH")"
+          echo "📌 Found UKI inside efi.bin: $UKI_FAT_PATH  (filename: $UKI_NAME)"
 
+          # ── Extract the UKI from the FAT image using mcopy ───────────────────
+          UKI_LOCAL="$TMP_EFI/original_uki.efi"
+          mcopy -i "$EFI_BIN" "$UKI_FAT_PATH" "$UKI_LOCAL"
+          echo "✅ Extracted UKI → $UKI_LOCAL ($(stat -c %s "$UKI_LOCAL") bytes)"
+
+          # ── Parse the UKI: extract initrd, cmdline, stub ─────────────────────
+          export UKI_SRC="$UKI_LOCAL"
           export REBUILD_DIR="$TMP_EFI"
 
           python3 << 'EOF'
@@ -222,14 +246,16 @@ jobs:
               if name == ".initrd":
                   with open(os.path.join(rebuild_dir, "initrd.img"), "wb") as f:
                       f.write(sec.get_data())
+                  print(f"  extracted .initrd  ({sec.SizeOfRawData} bytes)")
               elif name == ".cmdline":
                   with open(os.path.join(rebuild_dir, "cmdline.txt"), "wb") as f:
                       f.write(sec.get_data().rstrip(b"\x00"))
+                  print(f"  extracted .cmdline ({sec.SizeOfRawData} bytes)")
 
           keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
           stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
           if not stub_sections:
-              raise SystemExit("No stub sections found")
+              raise SystemExit("❌ No stub sections found in UKI")
 
           stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
 
@@ -254,43 +280,55 @@ jobs:
 
           with open(os.path.join(rebuild_dir, "stub.efi"), "wb") as f:
               f.write(new_raw)
+          print(f"  extracted stub.efi ({len(new_raw)} bytes)")
           EOF
 
-          # ── Fix: Align kernel Image to 64K boundary ──────────────────────────
-          # Resolves: EFI stub: FIRMWARE BUG: kernel image not aligned on 64k boundary
+          # ── Fix 2: Align kernel Image to 64K boundary ─────────────────────
+          # Eliminates: "EFI stub: FIRMWARE BUG: kernel image not aligned on 64k boundary"
           KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
           ALIGNED_IMAGE="$TMP_EFI/Image.aligned"
           cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
           IMAGE_SIZE=$(stat -c %s "$ALIGNED_IMAGE")
           ALIGNED_SIZE=$(( (IMAGE_SIZE + 65535) & ~65535 ))
           if [ "$IMAGE_SIZE" -ne "$ALIGNED_SIZE" ]; then
-            echo "Padding kernel Image from $IMAGE_SIZE to $ALIGNED_SIZE bytes (64K alignment)"
+            echo "📐 Aligning kernel: $IMAGE_SIZE → $ALIGNED_SIZE bytes (64K boundary)"
             truncate -s "$ALIGNED_SIZE" "$ALIGNED_IMAGE"
           else
-            echo "Kernel Image already 64K aligned ($IMAGE_SIZE bytes)"
+            echo "📐 Kernel already 64K-aligned ($IMAGE_SIZE bytes)"
           fi
-          # ─────────────────────────────────────────────────────────────────────
 
+          # ── Append rootdelay to cmdline ───────────────────────────────────
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt")"
           NEW_CMD="$ORIG_CMD rootdelay=10 rootwait"
+          echo "📝 Cmdline: $NEW_CMD"
 
+          # ── Rebuild UKI with ukify ─────────────────────────────────────────
+          NEW_UKI="$TMP_EFI/new_uki.efi"
           python3 "$WORKSPACE/ukify.py" build \
-            --linux "$ALIGNED_IMAGE" \
-            --initrd "$TMP_EFI/initrd.img" \
-            --cmdline "$NEW_CMD" \
+            --linux    "$ALIGNED_IMAGE" \
+            --initrd   "$TMP_EFI/initrd.img" \
+            --cmdline  "$NEW_CMD" \
             --devicetree "$DTB_SRC" \
-            --stub "$TMP_EFI/stub.efi" \
-            --output "$TMP_EFI/new_uki.efi"
+            --stub     "$TMP_EFI/stub.efi" \
+            --output   "$NEW_UKI"
+          echo "✅ New UKI built: $(stat -c %s "$NEW_UKI") bytes"
 
-          UKI_NAME="$(basename "$UKI_SRC")"
-          sudo cp -fv "$TMP_EFI/new_uki.efi" "$WORKSPACE/efi_mount/$MACHINE/EFI/Linux/$UKI_NAME"
-          sync
-          sudo umount "$WORKSPACE/efi_mount/$MACHINE"
+          # ── Inject new UKI back into efi.bin using mcopy (no loop mount) ──
+          # Delete the old .efi first so mcopy does not fail on overwrite,
+          # then copy the new one in under the same filename.
+          mdel  -i "$EFI_BIN" "$UKI_FAT_PATH" 2>/dev/null || true
+          mcopy -i "$EFI_BIN" "$NEW_UKI" "::EFI/Linux/$UKI_NAME"
+          echo "✅ efi.bin updated via mtools (no loop mount)"
 
-          echo "efi.bin patched with aligned kernel and updated UKI"
+          echo "📦 Final efi.bin:"
           ls -lh "$EFI_BIN"
+          echo "📋 EFI/Linux contents:"
+          mdir -i "$EFI_BIN" ::EFI/Linux
 
       - name: Rebuild dtb.bin
+        # Fix: mcopy renames the DTB to combined-dtb.dtb inside the FAT image.
+        # UEFI searches by that fixed name; using the machine-specific filename
+        # caused: "DtPlatformLoadDtbBlob combined-dtb.dtb load failed"
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -301,18 +339,15 @@ jobs:
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
 
-          [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "DTB not found: $DTB_SRC"; exit 1; }
+          [ -f "$DTB_BIN" ] || { echo "❌ dtb.bin not found"; exit 1; }
+          [ -f "$DTB_SRC" ] || { echo "❌ DTB not found: $DTB_SRC"; exit 1; }
 
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096 status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" >/dev/null
-
-          # Fix: UEFI searches for combined-dtb.dtb by name — rename on copy
-          # Resolves: DtPlatformLoadDtbBlob combined-dtb.dtb load failed
+          # Rename to combined-dtb.dtb so UEFI DtPlatformLoadDtbBlob finds it
           mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" :::combined-dtb.dtb
-
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
-          echo "dtb.bin updated (DTB stored as combined-dtb.dtb)"
+          echo "✅ dtb.bin updated (combined-dtb.dtb)"
           ls -lh "$DTB_BIN"
 
       - name: Repack updated meta tar
@@ -333,7 +368,7 @@ jobs:
 
           tar -C "$META_DIR" -cf "$FINAL_TAR" .
 
-          echo "Repacked meta tar:"
+          echo "✅ Repacked meta tar:"
           ls -lh "$FINAL_TAR"
 
       - name: Append artifacts to S3 upload list
@@ -350,10 +385,10 @@ jobs:
           : > "$FILE_LIST"
 
           FINAL_TAR="$WORKSPACE/output/$META_TAR"
-          [ -f "$FINAL_TAR" ] || { echo "Missing final meta tar: $FINAL_TAR"; exit 1; }
+          [ -f "$FINAL_TAR" ] || { echo "❌ Missing final meta tar: $FINAL_TAR"; exit 1; }
 
           echo "$FINAL_TAR" >> "$FILE_LIST"
-          echo "Queued for upload: $FINAL_TAR"
+          echo "✅ Queued for upload: $FINAL_TAR"
           cat "$FILE_LIST"
 
       - name: Upload updated meta to S3
@@ -373,17 +408,15 @@ jobs:
           set -euo pipefail
           ws="$WORKSPACE"
           sudo umount "$ws/rootfs_mount" 2>/dev/null || true
-          sudo umount "$ws/efi_mount/${{ matrix.machine }}" 2>/dev/null || true
-          rm -rf "$ws/artifacts" || true
-          rm -rf "$ws/downloads" || true
-          rm -rf "$ws/kobj" || true
-          rm -rf "$ws/meta_dir" || true
-          rm -rf "$ws/output" || true
+          rm -rf "$ws/artifacts"   || true
+          rm -rf "$ws/downloads"   || true
+          rm -rf "$ws/kobj"        || true
+          rm -rf "$ws/meta_dir"    || true
+          rm -rf "$ws/output"      || true
           rm -rf "$ws/rootfs_mount" || true
           rm -rf "$ws/efi_rebuild" || true
-          rm -rf "$ws/efi_mount" || true
-          rm -f "$ws/ukify.py" || true
-          rm -f "$ws/new_dtb.bin" || true
+          rm -f  "$ws/ukify.py"    || true
+          rm -f  "$ws/new_dtb.bin" || true
 
       - name: Update summary
         if: success() || failure()
