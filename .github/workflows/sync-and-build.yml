@@ -8,7 +8,7 @@ on:
         description: Docker image to use for the build
         required: false
         type: string
-        default: ghcr.io/qualcomm-linux/kmake-image:ver.1.0
+        default: kmake-image:ver.1.0
       build_matrix:
         description: Build matrix for multi target builds
         type: string
@@ -33,7 +33,7 @@ jobs:
         uses: qualcomm-linux/kernel-config/.github/actions/pull_docker_image@main
         with:
           image: ${{ inputs.docker_image }}
-          registry: artifacts.codelinaro.org/clo-420-qli-registry   # ← ADD THIS
+          registry: artifacts.codelinaro.org/clo-420-qli-registry
 
       - name: Checkout Video Driver
         uses: actions/checkout@v4
@@ -54,7 +54,7 @@ jobs:
         id: build_workspace
         uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
         with:
-          docker_image: kmake-image:ver.1.0
+          docker_image: ${{ inputs.docker_image }}
           workspace_path: ${{ github.workspace }}
 
       - name: Fix Workspace Ownership
@@ -391,4 +391,4 @@ jobs:
             echo "- Machine: $MACHINE"
             echo "- Meta tar: $META_TAR"
             echo "</details>"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY" 
