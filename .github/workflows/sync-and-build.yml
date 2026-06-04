@@ -30,24 +30,10 @@ jobs:
 
     steps:
       - name: Pull Docker image
-        shell: bash
-        env:
-          DOCKER_IMAGE: ${{ inputs.docker_image }}
-          GH_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          GH_ACTOR: ${{ github.actor }}
-        run: |
-          set -euo pipefail
-          SHORT_TAG="$(basename "${DOCKER_IMAGE}")"
-
-          if docker image inspect "${SHORT_TAG}" > /dev/null 2>&1; then
-            echo "✅ Docker image '${SHORT_TAG}' found in local runner cache. Skipping pull."
-          else
-            echo "📦 Image not in local cache. Pulling from GHCR: ${DOCKER_IMAGE}"
-            echo "${GH_TOKEN}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
-            docker pull "${DOCKER_IMAGE}"
-            docker tag "${DOCKER_IMAGE}" "${SHORT_TAG}"
-            echo "✅ Docker image pulled and tagged as ${SHORT_TAG}"
-          fi
+        uses: qualcomm-linux/kernel-config/.github/actions/pull_docker_image@main
+        with:
+          image: ${{ inputs.docker_image }}
+          registry: artifacts.codelinaro.org/clo-420-qli-registry   # ← ADD THIS
 
       - name: Checkout Video Driver
         uses: actions/checkout@v4
