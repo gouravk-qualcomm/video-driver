@@ -69,15 +69,18 @@ jobs:
 
       - name: Install helper tools
         shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          sudo apt-get update
+          sudo apt-get update -q
           sudo apt-get install -y python3-pip mtools dosfstools e2tools e2fsprogs
           python3 -m pip install --user -q pefile
           curl -fsSL \
-            -o "${{ github.workspace }}/ukify.py" \
+            -o "$WORKSPACE/ukify.py" \
             "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
-          chmod +x "${{ github.workspace }}/ukify.py"
+          chmod +x "$WORKSPACE/ukify.py"
+          echo "✅ Helper tools installed"
 
       - name: Download iris artifacts from S3
         shell: bash
@@ -128,7 +131,7 @@ jobs:
           echo "✅ Extracted meta contents:"
           find "$WORKSPACE/meta_dir/$MACHINE" -maxdepth 2 -type f | sort | head -100
 
-      - name: Inject artifacts into rootfs image
+      - name: Inject artifacts into rootfs
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -142,9 +145,12 @@ jobs:
           [ -f "$ROOTFS_IMG" ] || { echo "❌ rootfs.img not found under $META_DIR"; exit 1; }
           echo "📌 Using rootfs image: $ROOTFS_IMG"
 
-          # Detect kernel version from rootfs using debugfs (no loop mount needed)
+          # Detect kernel version from rootfs using debugfs
           KVER="$(debugfs -R "ls /lib/modules" "$ROOTFS_IMG" 2>/dev/null \
-            | grep -oP '[0-9]+\.[0-9]+\.[0-9a-zA-Z._+-]+' | head -1)"
+            | awk '{print $NF}' \
+            | grep -v '^\.' \
+            | grep -v '^$' \
+            | head -1)"
           [ -n "$KVER" ] || { echo "❌ Could not detect kernel version in rootfs via debugfs"; exit 1; }
           echo "📌 Kernel version in rootfs: $KVER"
 
@@ -155,35 +161,41 @@ jobs:
           debugfs -w -R "mkdir /data/vendor/iris_test_app" "$ROOTFS_IMG" 2>/dev/null || true
           debugfs -w -R "mkdir /data/vendor/iris_test_app/firmware" "$ROOTFS_IMG" 2>/dev/null || true
 
-          # Copy kernel module
+          # Inject kernel module
           debugfs -w -R \
             "write $WORKSPACE/video-driver/video/iris_vpu.ko /lib/modules/$KVER/updates/iris_vpu.ko" \
             "$ROOTFS_IMG"
+          echo "✅ iris_vpu.ko injected"
 
-          # Copy test application and data
+          # Inject test app
           debugfs -w -R \
             "write $WORKSPACE/downloads/iris_test_app/iris_v4l2_test /data/vendor/iris_test_app/iris_v4l2_test" \
             "$ROOTFS_IMG"
-          debugfs -w -R \
-            "write $WORKSPACE/downloads/vpu20_1v.mbn /data/vendor/iris_test_app/firmware/vpu20_1v.mbn" \
-            "$ROOTFS_IMG"
-          debugfs -w -R \
-            "write $WORKSPACE/downloads/video_clips_iris.tar.gz /data/vendor/iris_test_app/video_clips_iris.tar.gz" \
-            "$ROOTFS_IMG"
-
-          # Set executable permission on test binary (mode 0100755)
+          # Set executable permission (mode 0100755)
           debugfs -w -R \
             "set_inode_field /data/vendor/iris_test_app/iris_v4l2_test mode 0100755" \
             "$ROOTFS_IMG" 2>/dev/null || true
+          echo "✅ iris_v4l2_test injected"
 
-          # Verify filesystem integrity after writes
-          echo "🔍 Checking rootfs.img integrity..."
+          # Inject firmware
+          debugfs -w -R \
+            "write $WORKSPACE/downloads/vpu20_1v.mbn /data/vendor/iris_test_app/firmware/vpu20_1v.mbn" \
+            "$ROOTFS_IMG"
+          echo "✅ vpu20_1v.mbn injected"
+
+          # Inject video clips
+          debugfs -w -R \
+            "write $WORKSPACE/downloads/video_clips_iris.tar.gz /data/vendor/iris_test_app/video_clips_iris.tar.gz" \
+            "$ROOTFS_IMG"
+          echo "✅ video_clips_iris.tar.gz injected"
+
+          # Verify filesystem integrity
+          echo "🔍 Checking rootfs integrity..."
           e2fsck -p -f "$ROOTFS_IMG" || true
-
           echo "✅ rootfs.img updated successfully"
           ls -lh "$ROOTFS_IMG"
 
-      - name: Rebuild efi.bin (UKI + 64K alignment + rootdelay fix)
+      - name: Rebuild efi.bin (UKI + kernel alignment + rootdelay fix)
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -201,91 +213,105 @@ jobs:
 
           mkdir -p "$TMP_EFI"
 
-          # ── Step 1: List EFI/Linux directory inside efi.bin using mtools ──
+          # ── List EFI/Linux contents ────────────────────────────────────────
           echo "📂 Contents of EFI/Linux inside efi.bin:"
-          mdir -i "$EFI_BIN" ::/EFI/Linux/ 2>/dev/null || \
-            mdir -i "$EFI_BIN" ::EFI/Linux/ || \
-            { echo "❌ Could not list EFI/Linux inside efi.bin"; exit 1; }
+          mdir -i "$EFI_BIN" ::/EFI/Linux || { echo "❌ Could not list EFI/Linux in efi.bin"; exit 1; }
 
-          # ── Step 2: Extract UKI .efi using mcopy (no loop mount) ──
-          UKI_NAME="$(mdir -i "$EFI_BIN" ::/EFI/Linux/ 2>/dev/null \
-            | grep -i '\.efi' | awk '{print $NF}' | head -1)"
-          [ -n "$UKI_NAME" ] || { echo "❌ Could not find .efi inside efi.bin"; exit 1; }
+          # ── Find UKI filename ──────────────────────────────────────────────
+          UKI_NAME="$(mdir -i "$EFI_BIN" ::/EFI/Linux 2>/dev/null \
+            | awk '{print $NF}' \
+            | grep -i '\.efi$' \
+            | head -1)"
+          [ -n "$UKI_NAME" ] || { echo "❌ No .efi file found in EFI/Linux"; exit 1; }
           echo "📌 Found UKI: $UKI_NAME"
 
-          mcopy -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" "$TMP_EFI/original.efi"
-          [ -f "$TMP_EFI/original.efi" ] || { echo "❌ Failed to extract UKI from efi.bin"; exit 1; }
+          # ── Extract UKI from efi.bin ───────────────────────────────────────
+          mcopy -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" "$TMP_EFI/$UKI_NAME"
+          echo "✅ Extracted UKI: $TMP_EFI/$UKI_NAME"
 
-          # ── Step 3: Extract sections from UKI using Python + pefile ──
-          export UKI_PATH="$TMP_EFI/original.efi"
+          # ── Extract sections from UKI via Python (no backslash in f-strings) ──
+          export UKI_PATH="$TMP_EFI/$UKI_NAME"
           export REBUILD_DIR="$TMP_EFI"
 
           python3 << 'PYEOF'
-          import os, pefile, struct
+import os
+import pefile
+import struct
 
-          uki_path   = os.environ["UKI_PATH"]
-          rebuild_dir = os.environ["REBUILD_DIR"]
+uki_path   = os.environ["UKI_PATH"]
+rebuild_dir = os.environ["REBUILD_DIR"]
 
-          pe = pefile.PE(uki_path)
-          with open(uki_path, "rb") as f:
-              raw = bytearray(f.read())
+pe = pefile.PE(uki_path)
+with open(uki_path, "rb") as f:
+    raw = bytearray(f.read())
 
-          for sec in pe.sections:
-              name = sec.Name.decode().rstrip("\x00")
-              if name == ".initrd":
-                  with open(os.path.join(rebuild_dir, "initrd.img"), "wb") as f:
-                      f.write(sec.get_data())
-                  print(f"✅ Extracted .initrd ({len(sec.get_data())} bytes)")
-              elif name == ".cmdline":
-                  with open(os.path.join(rebuild_dir, "cmdline.txt"), "wb") as f:
-                      f.write(sec.get_data().rstrip(b"\x00"))
-                  print(f"✅ Extracted .cmdline: {sec.get_data().rstrip(b'\x00').decode(errors='replace')}")
-              elif name == ".linux":
-                  with open(os.path.join(rebuild_dir, "kernel.img"), "wb") as f:
-                      f.write(sec.get_data())
-                  print(f"✅ Extracted .linux kernel ({len(sec.get_data())} bytes)")
+# Extract .initrd and .cmdline sections
+for sec in pe.sections:
+    name = sec.Name.decode().rstrip("\x00")
+    data = sec.get_data()
 
-          # Build a minimal stub EFI from PE sections
-          keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
-          stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
-          if not stub_sections:
-              raise SystemExit("❌ No stub sections found in UKI")
+    if name == ".initrd":
+        out_path = os.path.join(rebuild_dir, "initrd.img")
+        with open(out_path, "wb") as f:
+            f.write(data)
+        print("Extracted .initrd: {} bytes".format(len(data)))
 
-          stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
-          pe_off   = struct.unpack_from("<I", raw, 0x3C)[0]
-          num_sec_off     = pe_off + 4 + 2
-          opt_hdr_size    = struct.unpack_from("<H", raw, pe_off + 4 + 16)[0]
-          sec_table_off   = pe_off + 4 + 20 + opt_hdr_size
+    elif name == ".cmdline":
+        out_path = os.path.join(rebuild_dir, "cmdline.txt")
+        cleaned = data.rstrip(b"\x00")
+        with open(out_path, "wb") as f:
+            f.write(cleaned)
+        # Pre-compute value to avoid backslash in f-string (Python < 3.12)
+        cmdline_text = cleaned.decode(errors="replace")
+        print("Extracted .cmdline: {}".format(cmdline_text))
 
-          new_raw = bytearray(raw[:stub_end])
-          struct.pack_into("<H", new_raw, num_sec_off, len(stub_sections))
+    elif name == ".linux":
+        out_path = os.path.join(rebuild_dir, "kernel.img")
+        with open(out_path, "wb") as f:
+            f.write(data)
+        print("Extracted .linux: {} bytes".format(len(data)))
 
-          for i, s in enumerate(pe.sections):
-              name = s.Name.decode().rstrip("\x00")
-              if name not in keep:
-                  entry_off = sec_table_off + (i * 40)
-                  if entry_off + 40 <= len(new_raw):
-                      new_raw[entry_off:entry_off+40] = b"\x00" * 40
+# Extract stub (PE sections to keep)
+keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}
+stub_sections = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]
+if not stub_sections:
+    raise SystemExit("No stub sections found in UKI")
 
-          size_of_image_off = pe_off + 4 + 20 + 56
-          new_size = ((stub_end + 0xFFF) & ~0xFFF)
-          struct.pack_into("<I", new_raw, size_of_image_off, new_size)
+stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_sections)
 
-          with open(os.path.join(rebuild_dir, "stub.efi"), "wb") as f:
-              f.write(new_raw)
-          print(f"✅ Stub EFI written ({len(new_raw)} bytes)")
-          PYEOF
+pe_off          = struct.unpack_from("<I", raw, 0x3C)[0]
+num_sec_off     = pe_off + 4 + 2
+opt_hdr_size    = struct.unpack_from("<H", raw, pe_off + 4 + 16)[0]
+sec_table_off   = pe_off + 4 + 20 + opt_hdr_size
 
-          # ── Step 4: Align kernel to 64K boundary ──────────────────────────
-          # Use extracted kernel if present, otherwise fall back to build output
-          if [ -f "$TMP_EFI/kernel.img" ]; then
-            KERNEL_RAW="$TMP_EFI/kernel.img"
-            echo "📌 Using kernel extracted from UKI"
-          else
-            KERNEL_RAW="$WORKSPACE/kobj/arch/arm64/boot/Image"
-            echo "📌 Using kernel from build output"
-          fi
+new_raw = bytearray(raw[:stub_end])
+struct.pack_into("<H", new_raw, num_sec_off, len(stub_sections))
 
+for i, s in enumerate(pe.sections):
+    sec_name = s.Name.decode().rstrip("\x00")
+    if sec_name not in keep:
+        entry_off = sec_table_off + (i * 40)
+        if entry_off + 40 <= len(new_raw):
+            new_raw[entry_off:entry_off + 40] = b"\x00" * 40
+
+size_of_image_off = pe_off + 4 + 20 + 56
+new_size = (stub_end + 0xFFF) & ~0xFFF
+struct.pack_into("<I", new_raw, size_of_image_off, new_size)
+
+stub_path = os.path.join(rebuild_dir, "stub.efi")
+with open(stub_path, "wb") as f:
+    f.write(new_raw)
+print("Extracted stub.efi: {} bytes".format(len(new_raw)))
+PYEOF
+
+          # ── Verify required files extracted ────────────────────────────────
+          for f in initrd.img cmdline.txt kernel.img stub.efi; do
+            [ -f "$TMP_EFI/$f" ] || { echo "❌ Missing extracted file: $f"; exit 1; }
+          done
+          echo "✅ All UKI sections extracted"
+
+          # ── Align kernel to 64K boundary ──────────────────────────────────
+          KERNEL_RAW="$TMP_EFI/kernel.img"
           ALIGNED_IMAGE="$TMP_EFI/kernel.aligned"
           cp "$KERNEL_RAW" "$ALIGNED_IMAGE"
 
@@ -293,55 +319,47 @@ jobs:
           ALIGNED_SIZE=$(( (IMAGE_SIZE + 65535) & ~65535 ))
 
           if [ "$IMAGE_SIZE" -ne "$ALIGNED_SIZE" ]; then
-            echo "📐 Aligning kernel: $IMAGE_SIZE → $ALIGNED_SIZE bytes (padding $(( ALIGNED_SIZE - IMAGE_SIZE )) bytes)"
+            echo "📐 Aligning kernel: $IMAGE_SIZE -> $ALIGNED_SIZE bytes"
             truncate -s "$ALIGNED_SIZE" "$ALIGNED_IMAGE"
           else
             echo "📐 Kernel already aligned at $IMAGE_SIZE bytes"
           fi
 
-          # Verify alignment
+          # Mandatory verification
           FINAL_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
           if (( FINAL_SIZE % 65536 != 0 )); then
-            echo "❌ Kernel alignment verification failed: $FINAL_SIZE is not divisible by 65536"
+            echo "❌ Kernel alignment verification failed: $FINAL_SIZE is not a multiple of 65536"
             exit 1
           fi
-          echo "✅ Kernel alignment verified: $FINAL_SIZE bytes ($(( FINAL_SIZE / 1024 )) KiB)"
+          echo "✅ Kernel aligned and verified: $FINAL_SIZE bytes"
 
-          # ── Step 5: Patch cmdline — strip duplicates, add rootdelay=30 ────
-          ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt" | tr -d '\0' | xargs)"
-          echo "📌 Original cmdline: $ORIG_CMD"
-
-          # Remove any existing rootdelay= and rootwait entries to avoid duplicates
+          # ── Build new cmdline (strip duplicates, inject rootdelay) ─────────
+          ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt" | tr -d '\0')"
           CLEAN_CMD="$(echo "$ORIG_CMD" \
             | sed 's/rootdelay=[^ ]*//g' \
             | sed 's/rootwait//g' \
             | xargs)"
           NEW_CMD="$CLEAN_CMD rootdelay=30 rootwait"
-          echo "📌 New cmdline:      $NEW_CMD"
+          echo "📌 New cmdline: $NEW_CMD"
 
-          # ── Step 6: Rebuild UKI with ukify ────────────────────────────────
+          # ── Rebuild UKI via ukify ──────────────────────────────────────────
           python3 "$WORKSPACE/ukify.py" build \
-            --linux        "$ALIGNED_IMAGE" \
-            --initrd       "$TMP_EFI/initrd.img" \
-            --cmdline      "$NEW_CMD" \
-            --devicetree   "$DTB_SRC" \
-            --stub         "$TMP_EFI/stub.efi" \
-            --output       "$TMP_EFI/new_uki.efi"
+            --linux "$ALIGNED_IMAGE" \
+            --initrd "$TMP_EFI/initrd.img" \
+            --cmdline "$NEW_CMD" \
+            --devicetree "$DTB_SRC" \
+            --stub "$TMP_EFI/stub.efi" \
+            --output "$TMP_EFI/new_uki.efi"
 
           [ -f "$TMP_EFI/new_uki.efi" ] || { echo "❌ ukify failed to produce new_uki.efi"; exit 1; }
-          echo "✅ New UKI built: $(ls -lh "$TMP_EFI/new_uki.efi" | awk '{print $5}')"
+          echo "✅ New UKI built: $(stat -c%s "$TMP_EFI/new_uki.efi") bytes"
 
-          # ── Step 7: Inject new UKI back into efi.bin using mtools ─────────
-          # Remove old UKI then copy new one — no loop mount needed
-          mdel  -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" 2>/dev/null || true
+          # ── Inject new UKI back into efi.bin via mtools ───────────────────
+          mdel -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" 2>/dev/null || true
           mcopy -i "$EFI_BIN" "$TMP_EFI/new_uki.efi" "::/EFI/Linux/$UKI_NAME"
 
           echo "✅ efi.bin patched successfully"
           ls -lh "$EFI_BIN"
-
-          # Verify the UKI is readable back from the image
-          echo "🔍 Verifying UKI inside efi.bin:"
-          mdir -i "$EFI_BIN" ::/EFI/Linux/
 
       - name: Rebuild dtb.bin
         shell: bash
@@ -355,16 +373,24 @@ jobs:
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
 
           [ -f "$DTB_BIN" ] || { echo "❌ dtb.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "❌ DTB source not found: $DTB_SRC"; exit 1; }
+          [ -f "$DTB_SRC" ] || { echo "❌ DTB not found: $DTB_SRC"; exit 1; }
 
-          # Create a fresh FAT image and copy DTB as combined-dtb.dtb
-          # UEFI searches for this fixed filename — do not use the machine name
-          dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count=4096 status=none
-          mkfs.vfat "$WORKSPACE/new_dtb.bin" >/dev/null
-          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" :::combined-dtb.dtb
+          DTB_SIZE=$(stat -c%s "$DTB_BIN")
+          echo "📌 Original dtb.bin size: $DTB_SIZE bytes"
+
+          # Create fresh VFAT image sized to match original
+          VFAT_SIZE_KB=$(( (DTB_SIZE + 1023) / 1024 ))
+          [ "$VFAT_SIZE_KB" -lt 4096 ] && VFAT_SIZE_KB=4096
+
+          dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" \
+            bs=1K count="$VFAT_SIZE_KB" status=none
+          mkfs.vfat "$WORKSPACE/new_dtb.bin" > /dev/null
+
+          # Copy DTB with UEFI-required fixed filename
+          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" ":::combined-dtb.dtb"
 
           # Verify
-          echo "🔍 Verifying dtb.bin contents:"
+          echo "📂 Contents of new dtb.bin:"
           mdir -i "$WORKSPACE/new_dtb.bin"
 
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
@@ -428,14 +454,15 @@ jobs:
         run: |
           set -euo pipefail
           ws="$WORKSPACE"
-          rm -rf "$ws/artifacts"   || true
-          rm -rf "$ws/downloads"   || true
-          rm -rf "$ws/kobj"        || true
-          rm -rf "$ws/meta_dir"    || true
-          rm -rf "$ws/output"      || true
-          rm -rf "$ws/efi_rebuild" || true
-          rm -f  "$ws/ukify.py"    || true
-          rm -f  "$ws/new_dtb.bin" || true
+          rm -rf "$ws/artifacts"     || true
+          rm -rf "$ws/downloads"     || true
+          rm -rf "$ws/kobj"          || true
+          rm -rf "$ws/meta_dir"      || true
+          rm -rf "$ws/output"        || true
+          rm -rf "$ws/efi_rebuild"   || true
+          rm -f  "$ws/ukify.py"      || true
+          rm -f  "$ws/new_dtb.bin"   || true
+          echo "✅ Cleanup complete"
 
       - name: Update summary
         if: success() || failure()
