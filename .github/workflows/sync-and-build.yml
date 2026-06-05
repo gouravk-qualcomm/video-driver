@@ -133,8 +133,30 @@ jobs:
           [ -f "$ROOTFS_IMG" ] || { echo "rootfs.img not found under $META_DIR"; exit 1; }
           echo "Using rootfs image: $ROOTFS_IMG"
 
-          # Detect kernel version using e2ls (clean one-per-line output)
-          KVER="$(e2ls "$ROOTFS_IMG:/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1)"
+          # Debug: show raw e2ls output first
+          echo "--- Raw e2ls output of /lib/modules ---"
+          e2ls "$ROOTFS_IMG:/lib/modules" 2>&1 || true
+          echo "---------------------------------------"
+
+          # Method 1: e2ls
+          KVER="$(e2ls "$ROOTFS_IMG:/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')" || true
+
+          # Method 2: debugfs ls -l fallback
+          if [ -z "$KVER" ]; then
+            echo "e2ls returned empty, trying debugfs ls -l fallback..."
+            echo "--- Raw debugfs ls -l /lib/modules output ---"
+            debugfs -R "ls -l /lib/modules" "$ROOTFS_IMG" 2>&1 || true
+            echo "---------------------------------------------"
+            KVER="$(debugfs -R "ls -l /lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')" || true
+          fi
+
+          # Method 3: debugfs stat fallback
+          if [ -z "$KVER" ]; then
+            echo "debugfs ls -l returned empty, trying debugfs stat fallback..."
+            KVER="$(debugfs -R "ls /lib/modules" "$ROOTFS_IMG" 2>/dev/null | tr ' ' '\n' | grep '^[0-9]\+\.' | head -1 | tr -d '[:space:]')" || true
+          fi
+
+          echo "Detected KVER: '$KVER'"
           [ -n "$KVER" ] || { echo "Could not detect kernel version in rootfs"; exit 1; }
           echo "Kernel version in rootfs: $KVER"
 
@@ -179,12 +201,10 @@ jobs:
           META_DIR="$WORKSPACE/meta_dir/$MACHINE"
           EFI_BIN="$(find "$META_DIR" -name "efi.bin" | head -1)"
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-          KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
           TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
 
-          [ -f "$EFI_BIN" ]    || { echo "efi.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ]    || { echo "DTB not found: $DTB_SRC"; exit 1; }
-          [ -f "$KERNEL_SRC" ] || { echo "Kernel Image not found: $KERNEL_SRC"; exit 1; }
+          [ -f "$EFI_BIN" ] || { echo "efi.bin not found"; exit 1; }
+          [ -f "$DTB_SRC" ] || { echo "DTB not found: $DTB_SRC"; exit 1; }
 
           mkdir -p "$TMP_EFI"
 
@@ -201,47 +221,47 @@ jobs:
           mcopy -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" "$TMP_EFI/$UKI_NAME"
           echo "Extracted UKI: $TMP_EFI/$UKI_NAME"
 
-          # Write Python extraction script line by line (no heredoc to avoid YAML parse issues)
+          # Write Python extraction script using printf (no heredoc)
           PYFILE="$TMP_EFI/extract_uki.py"
-          printf '%s\n' "import os, pefile, struct" > "$PYFILE"
-          printf '%s\n' "uki_path    = os.environ['UKI_PATH']" >> "$PYFILE"
-          printf '%s\n' "rebuild_dir = os.environ['REBUILD_DIR']" >> "$PYFILE"
-          printf '%s\n' "pe  = pefile.PE(uki_path)" >> "$PYFILE"
-          printf '%s\n' "with open(uki_path, 'rb') as fh:" >> "$PYFILE"
-          printf '%s\n' "    raw = bytearray(fh.read())" >> "$PYFILE"
-          printf '%s\n' "for sec in pe.sections:" >> "$PYFILE"
-          printf '%s\n' "    name = sec.Name.decode().rstrip('\x00')" >> "$PYFILE"
-          printf '%s\n' "    data = sec.get_data()" >> "$PYFILE"
-          printf '%s\n' "    if name == '.initrd':" >> "$PYFILE"
-          printf '%s\n' "        out = os.path.join(rebuild_dir, 'initrd.img')" >> "$PYFILE"
-          printf '%s\n' "        open(out, 'wb').write(data)" >> "$PYFILE"
-          printf '%s\n' "        print('Extracted .initrd: ' + str(len(data)) + ' bytes')" >> "$PYFILE"
-          printf '%s\n' "    elif name == '.cmdline':" >> "$PYFILE"
-          printf '%s\n' "        out = os.path.join(rebuild_dir, 'cmdline.txt')" >> "$PYFILE"
-          printf '%s\n' "        cleaned = data.rstrip(b'\x00')" >> "$PYFILE"
-          printf '%s\n' "        open(out, 'wb').write(cleaned)" >> "$PYFILE"
-          printf '%s\n' "        print('Extracted .cmdline: ' + cleaned.decode(errors='replace'))" >> "$PYFILE"
-          printf '%s\n' "keep = {'.text', '.rodata', '.data', '.reloc', '.sdmagic'}" >> "$PYFILE"
-          printf '%s\n' "stub_secs = [s for s in pe.sections if s.Name.decode().rstrip('\x00') in keep]" >> "$PYFILE"
-          printf '%s\n' "if not stub_secs: raise SystemExit('No stub sections found')" >> "$PYFILE"
-          printf '%s\n' "stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_secs)" >> "$PYFILE"
-          printf '%s\n' "pe_off        = struct.unpack_from('<I', raw, 0x3C)[0]" >> "$PYFILE"
-          printf '%s\n' "num_sec_off   = pe_off + 4 + 2" >> "$PYFILE"
-          printf '%s\n' "opt_hdr_size  = struct.unpack_from('<H', raw, pe_off + 4 + 16)[0]" >> "$PYFILE"
-          printf '%s\n' "sec_tbl_off   = pe_off + 4 + 20 + opt_hdr_size" >> "$PYFILE"
-          printf '%s\n' "new_raw = bytearray(raw[:stub_end])" >> "$PYFILE"
-          printf '%s\n' "struct.pack_into('<H', new_raw, num_sec_off, len(stub_secs))" >> "$PYFILE"
-          printf '%s\n' "for i, s in enumerate(pe.sections):" >> "$PYFILE"
-          printf '%s\n' "    sn = s.Name.decode().rstrip('\x00')" >> "$PYFILE"
-          printf '%s\n' "    if sn not in keep:" >> "$PYFILE"
-          printf '%s\n' "        eo = sec_tbl_off + (i * 40)" >> "$PYFILE"
-          printf '%s\n' "        if eo + 40 <= len(new_raw): new_raw[eo:eo+40] = b'\x00' * 40" >> "$PYFILE"
-          printf '%s\n' "soi_off  = pe_off + 4 + 20 + 56" >> "$PYFILE"
-          printf '%s\n' "new_size = (stub_end + 0xFFF) & ~0xFFF" >> "$PYFILE"
-          printf '%s\n' "struct.pack_into('<I', new_raw, soi_off, new_size)" >> "$PYFILE"
-          printf '%s\n' "stub_path = os.path.join(rebuild_dir, 'stub.efi')" >> "$PYFILE"
-          printf '%s\n' "open(stub_path, 'wb').write(new_raw)" >> "$PYFILE"
-          printf '%s\n' "print('Extracted stub.efi: ' + str(len(new_raw)) + ' bytes')" >> "$PYFILE"
+          printf '%s\n' 'import os, pefile, struct' > "$PYFILE"
+          printf '%s\n' 'uki_path    = os.environ["UKI_PATH"]' >> "$PYFILE"
+          printf '%s\n' 'rebuild_dir = os.environ["REBUILD_DIR"]' >> "$PYFILE"
+          printf '%s\n' 'pe  = pefile.PE(uki_path)' >> "$PYFILE"
+          printf '%s\n' 'with open(uki_path, "rb") as fh:' >> "$PYFILE"
+          printf '%s\n' '    raw = bytearray(fh.read())' >> "$PYFILE"
+          printf '%s\n' 'for sec in pe.sections:' >> "$PYFILE"
+          printf '%s\n' '    name = sec.Name.decode().rstrip("\x00")' >> "$PYFILE"
+          printf '%s\n' '    data = sec.get_data()' >> "$PYFILE"
+          printf '%s\n' '    if name == ".initrd":' >> "$PYFILE"
+          printf '%s\n' '        out = os.path.join(rebuild_dir, "initrd.img")' >> "$PYFILE"
+          printf '%s\n' '        open(out, "wb").write(data)' >> "$PYFILE"
+          printf '%s\n' '        print("Extracted .initrd: {} bytes".format(len(data)))' >> "$PYFILE"
+          printf '%s\n' '    elif name == ".cmdline":' >> "$PYFILE"
+          printf '%s\n' '        out = os.path.join(rebuild_dir, "cmdline.txt")' >> "$PYFILE"
+          printf '%s\n' '        cleaned = data.rstrip(b"\x00")' >> "$PYFILE"
+          printf '%s\n' '        open(out, "wb").write(cleaned)' >> "$PYFILE"
+          printf '%s\n' '        print("Extracted .cmdline: {}".format(cleaned.decode(errors="replace")))' >> "$PYFILE"
+          printf '%s\n' 'keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}' >> "$PYFILE"
+          printf '%s\n' 'stub_secs = [s for s in pe.sections if s.Name.decode().rstrip("\x00") in keep]' >> "$PYFILE"
+          printf '%s\n' 'if not stub_secs: raise SystemExit("No stub sections found")' >> "$PYFILE"
+          printf '%s\n' 'stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_secs)' >> "$PYFILE"
+          printf '%s\n' 'pe_off        = struct.unpack_from("<I", raw, 0x3C)[0]' >> "$PYFILE"
+          printf '%s\n' 'num_sec_off   = pe_off + 4 + 2' >> "$PYFILE"
+          printf '%s\n' 'opt_hdr_size  = struct.unpack_from("<H", raw, pe_off + 4 + 16)[0]' >> "$PYFILE"
+          printf '%s\n' 'sec_table_off = pe_off + 4 + 20 + opt_hdr_size' >> "$PYFILE"
+          printf '%s\n' 'new_raw = bytearray(raw[:stub_end])' >> "$PYFILE"
+          printf '%s\n' 'struct.pack_into("<H", new_raw, num_sec_off, len(stub_secs))' >> "$PYFILE"
+          printf '%s\n' 'for i, s in enumerate(pe.sections):' >> "$PYFILE"
+          printf '%s\n' '    sname = s.Name.decode().rstrip("\x00")' >> "$PYFILE"
+          printf '%s\n' '    if sname not in keep:' >> "$PYFILE"
+          printf '%s\n' '        off = sec_table_off + (i * 40)' >> "$PYFILE"
+          printf '%s\n' '        if off + 40 <= len(new_raw): new_raw[off:off+40] = b"\x00" * 40' >> "$PYFILE"
+          printf '%s\n' 'size_img_off = pe_off + 4 + 20 + 56' >> "$PYFILE"
+          printf '%s\n' 'new_size = (stub_end + 0xFFF) & ~0xFFF' >> "$PYFILE"
+          printf '%s\n' 'struct.pack_into("<I", new_raw, size_img_off, new_size)' >> "$PYFILE"
+          printf '%s\n' 'stub_path = os.path.join(rebuild_dir, "stub.efi")' >> "$PYFILE"
+          printf '%s\n' 'open(stub_path, "wb").write(new_raw)' >> "$PYFILE"
+          printf '%s\n' 'print("Extracted stub.efi: {} bytes".format(len(new_raw)))' >> "$PYFILE"
 
           export UKI_PATH="$TMP_EFI/$UKI_NAME"
           export REBUILD_DIR="$TMP_EFI"
@@ -253,13 +273,16 @@ jobs:
           done
           echo "All UKI sections extracted"
 
-          # Align FRESH kernel (from build output) to 64K boundary
-          ALIGNED_IMAGE="$TMP_EFI/kernel.aligned"
-          cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
+          # Use fresh built kernel (NOT the old kernel from UKI)
+          FRESH_KERNEL="$WORKSPACE/kobj/arch/arm64/boot/Image"
+          [ -f "$FRESH_KERNEL" ] || { echo "Fresh kernel not found: $FRESH_KERNEL"; exit 1; }
+          echo "Using fresh kernel: $FRESH_KERNEL ($(stat -c%s "$FRESH_KERNEL") bytes)"
 
+          # Align fresh kernel to 64K boundary
+          ALIGNED_IMAGE="$TMP_EFI/kernel.aligned"
+          cp "$FRESH_KERNEL" "$ALIGNED_IMAGE"
           IMAGE_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
           ALIGNED_SIZE=$(( (IMAGE_SIZE + 65535) & ~65535 ))
-
           if [ "$IMAGE_SIZE" -ne "$ALIGNED_SIZE" ]; then
             echo "Aligning kernel: $IMAGE_SIZE -> $ALIGNED_SIZE bytes"
             truncate -s "$ALIGNED_SIZE" "$ALIGNED_IMAGE"
@@ -267,9 +290,10 @@ jobs:
             echo "Kernel already aligned at $IMAGE_SIZE bytes"
           fi
 
+          # Mandatory 64K alignment verification
           FINAL_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
           if (( FINAL_SIZE % 65536 != 0 )); then
-            echo "Kernel alignment verification failed: $FINAL_SIZE is not a multiple of 65536"
+            echo "Kernel alignment verification FAILED: $FINAL_SIZE is not a multiple of 65536"
             exit 1
           fi
           echo "Kernel aligned and verified: $FINAL_SIZE bytes"
@@ -289,7 +313,6 @@ jobs:
           # Inject new UKI back into efi.bin via mtools
           mdel -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" 2>/dev/null || true
           mcopy -i "$EFI_BIN" "$TMP_EFI/new_uki.efi" "::/EFI/Linux/$UKI_NAME"
-
           echo "efi.bin patched successfully"
           ls -lh "$EFI_BIN"
 
