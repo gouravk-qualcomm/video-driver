@@ -134,36 +134,37 @@ jobs:
           echo "Using rootfs image: $ROOTFS_IMG"
 
           # Debug: show raw e2ls output
-          echo "Raw e2ls output of /lib/modules:"
-          e2ls "$ROOTFS_IMG:/lib/modules" 2>&1 || true
+          # /lib is a symlink to usr/lib on Ubuntu 22.04 — must use real path
+          echo "Raw e2ls output of /usr/lib/modules:"
+          e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>&1 || true
 
-          # Method 1: e2ls
-          KVER="$(e2ls "$ROOTFS_IMG:/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')"
+          # Method 1: e2ls using real path /usr/lib/modules
+          KVER="$(e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')"
 
           # Method 2: debugfs ls -l fallback
           if [ -z "$KVER" ]; then
             echo "e2ls returned empty, trying debugfs ls -l fallback..."
-            KVER="$(debugfs -R "ls -l /lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')"
+            KVER="$(debugfs -R "ls -l /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')"
           fi
 
-          # Method 3: debugfs stat fallback
+          # Method 3: debugfs regex fallback
           if [ -z "$KVER" ]; then
-            echo "debugfs ls -l returned empty, trying debugfs stat fallback..."
-            KVER="$(debugfs -R "ls /lib/modules" "$ROOTFS_IMG" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9][^ ]*' | head -1 | tr -d '[:space:]')"
+            echo "debugfs ls -l returned empty, trying debugfs regex fallback..."
+            KVER="$(debugfs -R "ls /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | grep -oE '[0-9]+[.][0-9]+[.][0-9][^ ]*' | head -1 | tr -d '[:space:]')"
           fi
 
           echo "Detected KVER: '$KVER'"
           [ -n "$KVER" ] || { echo "Could not detect kernel version in rootfs"; exit 1; }
 
-          # Create required directories
-          debugfs -w -R "mkdir /lib/modules/$KVER/updates" "$ROOTFS_IMG" 2>/dev/null || true
+          # Create required directories (use real path /usr/lib/modules)
+          debugfs -w -R "mkdir /usr/lib/modules/$KVER/updates" "$ROOTFS_IMG" 2>/dev/null || true
           debugfs -w -R "mkdir /data" "$ROOTFS_IMG" 2>/dev/null || true
           debugfs -w -R "mkdir /data/vendor" "$ROOTFS_IMG" 2>/dev/null || true
           debugfs -w -R "mkdir /data/vendor/iris_test_app" "$ROOTFS_IMG" 2>/dev/null || true
           debugfs -w -R "mkdir /data/vendor/iris_test_app/firmware" "$ROOTFS_IMG" 2>/dev/null || true
 
-          # Inject kernel module
-          debugfs -w -R "write $WORKSPACE/video-driver/video/iris_vpu.ko /lib/modules/$KVER/updates/iris_vpu.ko" "$ROOTFS_IMG"
+          # Inject kernel module (use real path /usr/lib/modules)
+          debugfs -w -R "write $WORKSPACE/video-driver/video/iris_vpu.ko /usr/lib/modules/$KVER/updates/iris_vpu.ko" "$ROOTFS_IMG"
           echo "iris_vpu.ko injected"
 
           # Inject test app
@@ -199,10 +200,14 @@ jobs:
 
           [ -f "$EFI_BIN" ] || { echo "efi.bin not found"; exit 1; }
 
-          # DTB: try exact match first, then prefix glob
+          # Find fresh kernel
+          KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
+          [ -f "$KERNEL_SRC" ] || { echo "Kernel Image not found at $KERNEL_SRC"; exit 1; }
+
+          # Find DTB — exact match first, then prefix glob fallback
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           if [ ! -f "$DTB_SRC" ]; then
-            echo "Exact DTB not found for $MACHINE, searching for prefix match..."
+            echo "Exact DTB not found, searching for prefix match..."
             DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" 2>/dev/null | head -1)"
           fi
           [ -f "$DTB_SRC" ] || { echo "No DTB found for machine: $MACHINE"; exit 1; }
@@ -215,15 +220,15 @@ jobs:
           mdir -i "$EFI_BIN" ::/EFI/Linux || { echo "Could not list EFI/Linux in efi.bin"; exit 1; }
 
           # Find UKI filename
-          UKI_NAME="$(mdir -i "$EFI_BIN" ::/EFI/Linux 2>/dev/null | awk '{print $NF}' | grep -i '\.efi$' | head -1)"
+          UKI_NAME="$(mdir -i "$EFI_BIN" ::/EFI/Linux 2>/dev/null | awk '{print $NF}' | grep -i '[.]efi$' | head -1)"
           [ -n "$UKI_NAME" ] || { echo "No .efi file found in EFI/Linux"; exit 1; }
           echo "Found UKI: $UKI_NAME"
 
-          # Extract UKI from efi.bin
+          # Extract UKI from efi.bin via mtools (no loop mount)
           mcopy -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" "$TMP_EFI/$UKI_NAME"
           echo "Extracted UKI: $TMP_EFI/$UKI_NAME"
 
-          # Write Python extraction script using printf (no heredoc)
+          # Write Python extraction script using printf line-by-line
           PYFILE="$TMP_EFI/extract_uki.py"
           printf '%s\n' 'import os, pefile, struct' > "$PYFILE"
           printf '%s\n' 'uki_path    = os.environ["UKI_PATH"]' >> "$PYFILE"
@@ -257,8 +262,7 @@ jobs:
           printf '%s\n' '    sn = s.Name.decode().rstrip("\x00")' >> "$PYFILE"
           printf '%s\n' '    if sn not in keep:' >> "$PYFILE"
           printf '%s\n' '        off = sec_table_off + (i * 40)' >> "$PYFILE"
-          printf '%s\n' '        if off + 40 <= len(new_raw):' >> "$PYFILE"
-          printf '%s\n' '            new_raw[off:off+40] = b"\x00" * 40' >> "$PYFILE"
+          printf '%s\n' '        if off + 40 <= len(new_raw): new_raw[off:off+40] = b"\x00" * 40' >> "$PYFILE"
           printf '%s\n' 'soi_off  = pe_off + 4 + 20 + 56' >> "$PYFILE"
           printf '%s\n' 'new_size = (stub_end + 0xFFF) & ~0xFFF' >> "$PYFILE"
           printf '%s\n' 'struct.pack_into("<I", new_raw, soi_off, new_size)' >> "$PYFILE"
@@ -276,11 +280,7 @@ jobs:
           done
           echo "All UKI sections extracted"
 
-          # Fresh kernel from build output (NOT from old UKI)
-          KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
-          [ -f "$KERNEL_SRC" ] || { echo "Fresh kernel Image not found at: $KERNEL_SRC"; exit 1; }
-
-          # Align kernel to 64K boundary
+          # Align fresh kernel to 64K boundary
           ALIGNED_IMAGE="$TMP_EFI/kernel.aligned"
           cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
           IMAGE_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
@@ -291,8 +291,6 @@ jobs:
           else
             echo "Kernel already aligned at $IMAGE_SIZE bytes"
           fi
-
-          # Mandatory alignment verification
           FINAL_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
           if (( FINAL_SIZE % 65536 != 0 )); then
             echo "Kernel alignment verification failed: $FINAL_SIZE is not a multiple of 65536"
@@ -300,28 +298,25 @@ jobs:
           fi
           echo "Kernel aligned and verified: $FINAL_SIZE bytes"
 
-          # Build new cmdline (strip duplicates, inject rootdelay)
+          # Build new cmdline — strip duplicates, inject rootdelay=30
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt" | tr -d '\0')"
           CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | xargs)"
           NEW_CMD="$CLEAN_CMD rootdelay=30 rootwait"
           echo "New cmdline: $NEW_CMD"
 
-          # Rebuild UKI via ukify
+          # Rebuild UKI via ukify using fresh aligned kernel
           python3 "$WORKSPACE/ukify.py" build             --linux "$ALIGNED_IMAGE"             --initrd "$TMP_EFI/initrd.img"             --cmdline "$NEW_CMD"             --devicetree "$DTB_SRC"             --stub "$TMP_EFI/stub.efi"             --output "$TMP_EFI/new_uki.efi"
 
           [ -f "$TMP_EFI/new_uki.efi" ] || { echo "ukify failed to produce new_uki.efi"; exit 1; }
 
-          # Verify UKI is larger than aligned kernel (confirms --linux was embedded)
+          # Post-ukify size sanity check
           UKI_SIZE=$(stat -c%s "$TMP_EFI/new_uki.efi")
-          echo "Aligned kernel size : $FINAL_SIZE"
-          echo "New UKI size        : $UKI_SIZE"
+          echo "New UKI size: $UKI_SIZE bytes"
           [ "$UKI_SIZE" -gt "$FINAL_SIZE" ] || { echo "UKI suspiciously small — ukify may have ignored --linux"; exit 1; }
-          echo "New UKI built successfully: $UKI_SIZE bytes"
 
-          # Inject new UKI back into efi.bin via mtools
+          # Inject new UKI back into efi.bin via mtools (no loop mount)
           mdel -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" 2>/dev/null || true
           mcopy -i "$EFI_BIN" "$TMP_EFI/new_uki.efi" "::/EFI/Linux/$UKI_NAME"
-
           echo "efi.bin patched successfully"
           ls -lh "$EFI_BIN"
 
@@ -334,14 +329,15 @@ jobs:
           set -euo pipefail
 
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
-          [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
 
-          # Try exact match first, then prefix glob
+          # Find DTB — exact match first, then prefix glob fallback
           DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           if [ ! -f "$DTB_SRC" ]; then
-            echo "Exact DTB not found for $MACHINE, searching for prefix match..."
+            echo "Exact DTB not found, searching for prefix match..."
             DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" 2>/dev/null | head -1)"
           fi
+
+          [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
           [ -f "$DTB_SRC" ] || { echo "No DTB found for machine: $MACHINE"; exit 1; }
           echo "Using DTB: $DTB_SRC"
 
