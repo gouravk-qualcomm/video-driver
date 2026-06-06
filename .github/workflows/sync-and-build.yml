@@ -133,32 +133,27 @@ jobs:
           [ -f "$ROOTFS_IMG" ] || { echo "rootfs.img not found under $META_DIR"; exit 1; }
           echo "Using rootfs image: $ROOTFS_IMG"
 
-          # Debug: show raw e2ls output first
-          echo "--- Raw e2ls output of /lib/modules ---"
+          # Debug: show raw e2ls output
+          echo "Raw e2ls output of /lib/modules:"
           e2ls "$ROOTFS_IMG:/lib/modules" 2>&1 || true
-          echo "---------------------------------------"
 
           # Method 1: e2ls
-          KVER="$(e2ls "$ROOTFS_IMG:/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')" || true
+          KVER="$(e2ls "$ROOTFS_IMG:/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')"
 
           # Method 2: debugfs ls -l fallback
           if [ -z "$KVER" ]; then
             echo "e2ls returned empty, trying debugfs ls -l fallback..."
-            echo "--- Raw debugfs ls -l /lib/modules output ---"
-            debugfs -R "ls -l /lib/modules" "$ROOTFS_IMG" 2>&1 || true
-            echo "---------------------------------------------"
-            KVER="$(debugfs -R "ls -l /lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')" || true
+            KVER="$(debugfs -R "ls -l /lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')"
           fi
 
           # Method 3: debugfs stat fallback
           if [ -z "$KVER" ]; then
             echo "debugfs ls -l returned empty, trying debugfs stat fallback..."
-            KVER="$(debugfs -R "ls /lib/modules" "$ROOTFS_IMG" 2>/dev/null | tr ' ' '\n' | grep '^[0-9]\+\.' | head -1 | tr -d '[:space:]')" || true
+            KVER="$(debugfs -R "ls /lib/modules" "$ROOTFS_IMG" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9][^ ]*' | head -1 | tr -d '[:space:]')"
           fi
 
           echo "Detected KVER: '$KVER'"
           [ -n "$KVER" ] || { echo "Could not detect kernel version in rootfs"; exit 1; }
-          echo "Kernel version in rootfs: $KVER"
 
           # Create required directories
           debugfs -w -R "mkdir /lib/modules/$KVER/updates" "$ROOTFS_IMG" 2>/dev/null || true
@@ -200,11 +195,18 @@ jobs:
 
           META_DIR="$WORKSPACE/meta_dir/$MACHINE"
           EFI_BIN="$(find "$META_DIR" -name "efi.bin" | head -1)"
-          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
           TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
 
           [ -f "$EFI_BIN" ] || { echo "efi.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "DTB not found: $DTB_SRC"; exit 1; }
+
+          # DTB: try exact match first, then prefix glob
+          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
+          if [ ! -f "$DTB_SRC" ]; then
+            echo "Exact DTB not found for $MACHINE, searching for prefix match..."
+            DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" 2>/dev/null | head -1)"
+          fi
+          [ -f "$DTB_SRC" ] || { echo "No DTB found for machine: $MACHINE"; exit 1; }
+          echo "Using DTB: $DTB_SRC"
 
           mkdir -p "$TMP_EFI"
 
@@ -226,7 +228,7 @@ jobs:
           printf '%s\n' 'import os, pefile, struct' > "$PYFILE"
           printf '%s\n' 'uki_path    = os.environ["UKI_PATH"]' >> "$PYFILE"
           printf '%s\n' 'rebuild_dir = os.environ["REBUILD_DIR"]' >> "$PYFILE"
-          printf '%s\n' 'pe  = pefile.PE(uki_path)' >> "$PYFILE"
+          printf '%s\n' 'pe = pefile.PE(uki_path)' >> "$PYFILE"
           printf '%s\n' 'with open(uki_path, "rb") as fh:' >> "$PYFILE"
           printf '%s\n' '    raw = bytearray(fh.read())' >> "$PYFILE"
           printf '%s\n' 'for sec in pe.sections:' >> "$PYFILE"
@@ -252,13 +254,14 @@ jobs:
           printf '%s\n' 'new_raw = bytearray(raw[:stub_end])' >> "$PYFILE"
           printf '%s\n' 'struct.pack_into("<H", new_raw, num_sec_off, len(stub_secs))' >> "$PYFILE"
           printf '%s\n' 'for i, s in enumerate(pe.sections):' >> "$PYFILE"
-          printf '%s\n' '    sname = s.Name.decode().rstrip("\x00")' >> "$PYFILE"
-          printf '%s\n' '    if sname not in keep:' >> "$PYFILE"
+          printf '%s\n' '    sn = s.Name.decode().rstrip("\x00")' >> "$PYFILE"
+          printf '%s\n' '    if sn not in keep:' >> "$PYFILE"
           printf '%s\n' '        off = sec_table_off + (i * 40)' >> "$PYFILE"
-          printf '%s\n' '        if off + 40 <= len(new_raw): new_raw[off:off+40] = b"\x00" * 40' >> "$PYFILE"
-          printf '%s\n' 'size_img_off = pe_off + 4 + 20 + 56' >> "$PYFILE"
+          printf '%s\n' '        if off + 40 <= len(new_raw):' >> "$PYFILE"
+          printf '%s\n' '            new_raw[off:off+40] = b"\x00" * 40' >> "$PYFILE"
+          printf '%s\n' 'soi_off  = pe_off + 4 + 20 + 56' >> "$PYFILE"
           printf '%s\n' 'new_size = (stub_end + 0xFFF) & ~0xFFF' >> "$PYFILE"
-          printf '%s\n' 'struct.pack_into("<I", new_raw, size_img_off, new_size)' >> "$PYFILE"
+          printf '%s\n' 'struct.pack_into("<I", new_raw, soi_off, new_size)' >> "$PYFILE"
           printf '%s\n' 'stub_path = os.path.join(rebuild_dir, "stub.efi")' >> "$PYFILE"
           printf '%s\n' 'open(stub_path, "wb").write(new_raw)' >> "$PYFILE"
           printf '%s\n' 'print("Extracted stub.efi: {} bytes".format(len(new_raw)))' >> "$PYFILE"
@@ -273,14 +276,13 @@ jobs:
           done
           echo "All UKI sections extracted"
 
-          # Use fresh built kernel (NOT the old kernel from UKI)
-          FRESH_KERNEL="$WORKSPACE/kobj/arch/arm64/boot/Image"
-          [ -f "$FRESH_KERNEL" ] || { echo "Fresh kernel not found: $FRESH_KERNEL"; exit 1; }
-          echo "Using fresh kernel: $FRESH_KERNEL ($(stat -c%s "$FRESH_KERNEL") bytes)"
+          # Fresh kernel from build output (NOT from old UKI)
+          KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
+          [ -f "$KERNEL_SRC" ] || { echo "Fresh kernel Image not found at: $KERNEL_SRC"; exit 1; }
 
-          # Align fresh kernel to 64K boundary
+          # Align kernel to 64K boundary
           ALIGNED_IMAGE="$TMP_EFI/kernel.aligned"
-          cp "$FRESH_KERNEL" "$ALIGNED_IMAGE"
+          cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
           IMAGE_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
           ALIGNED_SIZE=$(( (IMAGE_SIZE + 65535) & ~65535 ))
           if [ "$IMAGE_SIZE" -ne "$ALIGNED_SIZE" ]; then
@@ -290,29 +292,36 @@ jobs:
             echo "Kernel already aligned at $IMAGE_SIZE bytes"
           fi
 
-          # Mandatory 64K alignment verification
+          # Mandatory alignment verification
           FINAL_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
           if (( FINAL_SIZE % 65536 != 0 )); then
-            echo "Kernel alignment verification FAILED: $FINAL_SIZE is not a multiple of 65536"
+            echo "Kernel alignment verification failed: $FINAL_SIZE is not a multiple of 65536"
             exit 1
           fi
           echo "Kernel aligned and verified: $FINAL_SIZE bytes"
 
-          # Build new cmdline - strip duplicates, inject rootdelay=30
+          # Build new cmdline (strip duplicates, inject rootdelay)
           ORIG_CMD="$(cat "$TMP_EFI/cmdline.txt" | tr -d '\0')"
           CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | xargs)"
           NEW_CMD="$CLEAN_CMD rootdelay=30 rootwait"
           echo "New cmdline: $NEW_CMD"
 
-          # Rebuild UKI via ukify using fresh kernel
+          # Rebuild UKI via ukify
           python3 "$WORKSPACE/ukify.py" build             --linux "$ALIGNED_IMAGE"             --initrd "$TMP_EFI/initrd.img"             --cmdline "$NEW_CMD"             --devicetree "$DTB_SRC"             --stub "$TMP_EFI/stub.efi"             --output "$TMP_EFI/new_uki.efi"
 
           [ -f "$TMP_EFI/new_uki.efi" ] || { echo "ukify failed to produce new_uki.efi"; exit 1; }
-          echo "New UKI built: $(stat -c%s "$TMP_EFI/new_uki.efi") bytes"
+
+          # Verify UKI is larger than aligned kernel (confirms --linux was embedded)
+          UKI_SIZE=$(stat -c%s "$TMP_EFI/new_uki.efi")
+          echo "Aligned kernel size : $FINAL_SIZE"
+          echo "New UKI size        : $UKI_SIZE"
+          [ "$UKI_SIZE" -gt "$FINAL_SIZE" ] || { echo "UKI suspiciously small — ukify may have ignored --linux"; exit 1; }
+          echo "New UKI built successfully: $UKI_SIZE bytes"
 
           # Inject new UKI back into efi.bin via mtools
           mdel -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" 2>/dev/null || true
           mcopy -i "$EFI_BIN" "$TMP_EFI/new_uki.efi" "::/EFI/Linux/$UKI_NAME"
+
           echo "efi.bin patched successfully"
           ls -lh "$EFI_BIN"
 
@@ -325,10 +334,16 @@ jobs:
           set -euo pipefail
 
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
-          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-
           [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
-          [ -f "$DTB_SRC" ] || { echo "DTB not found: $DTB_SRC"; exit 1; }
+
+          # Try exact match first, then prefix glob
+          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
+          if [ ! -f "$DTB_SRC" ]; then
+            echo "Exact DTB not found for $MACHINE, searching for prefix match..."
+            DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" 2>/dev/null | head -1)"
+          fi
+          [ -f "$DTB_SRC" ] || { echo "No DTB found for machine: $MACHINE"; exit 1; }
+          echo "Using DTB: $DTB_SRC"
 
           DTB_SIZE=$(stat -c%s "$DTB_BIN")
           echo "Original dtb.bin size: $DTB_SIZE bytes"
@@ -364,7 +379,6 @@ jobs:
 
           FINAL_TAR="$OUTDIR/$META_TAR"
           rm -f "$FINAL_TAR"
-
           tar -C "$META_DIR" -cf "$FINAL_TAR" .
 
           echo "Repacked meta tar:"
@@ -421,18 +435,15 @@ jobs:
         shell: bash
         env:
           BUILD_STATUS: ${{ steps.build_workspace.outcome }}
-          WORKSPACE: ${{ github.workspace }}
           MACHINE: ${{ matrix.machine }}
           META_TAR: ${{ matrix.meta_tar }}
         run: |
           set -euo pipefail
-
           if [ "$BUILD_STATUS" = "success" ]; then
             summary=":heavy_check_mark: Build Success"
           else
             summary=":x: Build Failed"
           fi
-
           {
             echo "<details><summary><i>Build Summary</i></summary>"
             echo "$summary"
