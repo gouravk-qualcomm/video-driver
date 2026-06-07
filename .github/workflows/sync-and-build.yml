@@ -131,16 +131,13 @@ jobs:
           echo "Raw e2ls output of /usr/lib/modules:"
           e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>&1 || true
 
-          # Method 1: e2ls on /usr/lib/modules (Ubuntu usr-merge: /lib -> /usr/lib)
-          KVER="$(e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')"
+          KVER="$(e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>/dev/null | grep -v '^\.\' | grep -v '^$' | head -1 | tr -d '[:space:]')"
 
-          # Method 2: debugfs ls -l fallback
           if [ -z "$KVER" ]; then
             echo "e2ls returned empty, trying debugfs ls -l fallback..."
             KVER="$(debugfs -R "ls -l /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')"
           fi
 
-          # Method 3: regex grep fallback
           if [ -z "$KVER" ]; then
             echo "debugfs ls -l returned empty, trying regex fallback..."
             KVER="$(debugfs -R "ls /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | grep -oE '[0-9]+[.][0-9]+[.][0-9][^ ]*' | head -1 | tr -d '[:space:]')"
@@ -277,8 +274,10 @@ jobs:
 
           ORIG_CMD="$(tr -d "\0" < "$TMP_EFI/cmdline.txt")"
           echo "Original cmdline: $ORIG_CMD"
-          CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.][^ ]*//g' | xargs)"
-          NEW_CMD="$CLEAN_CMD rootwait iommu.passthrough=1 arm-smmu.disable_bypass=0"
+          CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu.passthrough=[^ ]*//g' | sed 's/arm-smmu.disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | xargs)"
+
+          # Fix: iommu passthrough + smmu bypass + initramfs break for diagnosis
+          NEW_CMD="$CLEAN_CMD rootwait iommu.passthrough=1 arm-smmu.disable_bypass=0 break=mount"
           echo "Final cmdline: $NEW_CMD"
 
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --devicetree "$DTB_SRC" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
