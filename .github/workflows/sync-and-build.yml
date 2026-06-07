@@ -173,7 +173,7 @@ jobs:
           echo "rootfs.img updated successfully"
           ls -lh "$ROOTFS_IMG"
 
-      - name: Rebuild efi.bin (UKI + kernel alignment + rootdelay fix)
+      - name: Rebuild efi.bin (UKI + kernel alignment + cmdline fix)
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -275,10 +275,10 @@ jobs:
           fi
           echo "Kernel aligned and verified: $FINAL_SIZE bytes"
 
-          ORIG_CMD="$(tr -d '\0' < "$TMP_EFI/cmdline.txt")"
+          ORIG_CMD="$(tr -d "\0" < "$TMP_EFI/cmdline.txt")"
           echo "Original cmdline: $ORIG_CMD"
-          CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | xargs)"
-          NEW_CMD="$CLEAN_CMD rootdelay=60 rootwait"
+          CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.][^ ]*//g' | xargs)"
+          NEW_CMD="$CLEAN_CMD rootwait iommu.passthrough=1 arm-smmu.disable_bypass=0"
           echo "Final cmdline: $NEW_CMD"
 
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --devicetree "$DTB_SRC" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
@@ -300,8 +300,8 @@ jobs:
           printf '%s\n' '    if s.Name.decode().rstrip(chr(0)) == ".cmdline":' >> "$VERIFY_PYFILE"
           printf '%s\n' '        cmd = s.get_data().rstrip(b"\x00").decode(errors="replace")' >> "$VERIFY_PYFILE"
           printf '%s\n' '        print("Embedded cmdline: {}".format(cmd))' >> "$VERIFY_PYFILE"
-          printf '%s\n' '        assert "rootdelay=60" in cmd, "rootdelay=60 NOT in embedded cmdline!"' >> "$VERIFY_PYFILE"
-          printf '%s\n' '        print("rootdelay=60 verified in UKI")' >> "$VERIFY_PYFILE"
+          printf '%s\n' '        assert "iommu.passthrough=1" in cmd, "iommu.passthrough=1 NOT in embedded cmdline!"' >> "$VERIFY_PYFILE"
+          printf '%s\n' '        print("iommu.passthrough=1 verified in UKI")' >> "$VERIFY_PYFILE"
           export NEW_UKI="$TMP_EFI/new_uki.efi"
           python3 "$VERIFY_PYFILE"
 
@@ -339,7 +339,6 @@ jobs:
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count="$VFAT_SIZE_KB" status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" > /dev/null
 
-          # Fix: use :: (two colons) not ::: to avoid underscore prefix on filename
           mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" "::combined-dtb.dtb"
 
           echo "Contents of new dtb.bin:"
