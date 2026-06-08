@@ -170,16 +170,9 @@ jobs:
           KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
           [ -f "$KERNEL_SRC" ] || { echo "Fresh kernel not found: $KERNEL_SRC"; exit 1; }
           echo "Fresh kernel: $KERNEL_SRC ($(stat -c%s "$KERNEL_SRC") bytes)"
-          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-          if [ ! -f "$DTB_SRC" ]; then
-            find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "*.dtb" | grep -i "$(echo "$MACHINE" | cut -d"-" -f1)" | sort || true
-            DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" | head -1)"
-          fi
-          [ -f "$DTB_SRC" ] || { echo "No DTB found for machine: $MACHINE"; exit 1; }
-          echo "Using DTB: $DTB_SRC"
           mkdir -p "$TMP_EFI"
           mdir -i "$EFI_BIN" ::/EFI/Linux || { echo "Could not list EFI/Linux"; exit 1; }
-          UKI_NAME="$(mdir -i "$EFI_BIN" ::/EFI/Linux 2>/dev/null | awk '{print $NF}' | grep -i '\.efi$' | head -1)"
+          UKI_NAME="$(mdir -i "$EFI_BIN" ::/EFI/Linux 2>/dev/null | awk '{print $NF}' | grep -i '[.]efi$' | head -1)"
           [ -n "$UKI_NAME" ] || { echo "No .efi file found"; exit 1; }
           echo "Found UKI: $UKI_NAME"
           mcopy -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" "$TMP_EFI/$UKI_NAME"
@@ -240,7 +233,7 @@ jobs:
           echo "Kernel aligned: $FINAL_SIZE bytes"
           ORIG_CMD="$(tr -d '\0' < "$TMP_EFI/cmdline.txt")"
           echo "Original cmdline: $ORIG_CMD"
-          CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | xargs)"
+          CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | sed 's/clk_ignore_unused//g' | sed 's/pd_ignore_unused//g' | sed 's/ufshcd[.][^ ]*//g' | xargs)"
           NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused ufshcd.use_blk_mq=1"
           echo "Final cmdline: $NEW_CMD"
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
@@ -260,19 +253,27 @@ jobs:
           set -euo pipefail
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
           [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
-          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-          if [ ! -f "$DTB_SRC" ]; then
-            find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "*.dtb" | grep -i "$(echo "$MACHINE" | cut -d"-" -f1)" | sort || true
-            DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" | head -1)"
+
+          # Use original meta DTB - has correct UFS/ICC/SMMU bindings
+          # Our compiled DTB causes a80000.i2c -> UFS ICC dependency issue
+          ORIG_DTB="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "*.dtb" ! -name "*.dtbo" | head -1)"
+          if [ -z "$ORIG_DTB" ] || [ ! -f "$ORIG_DTB" ]; then
+            echo "No original DTB found in meta, falling back to compiled DTB..."
+            ORIG_DTB="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
+            if [ ! -f "$ORIG_DTB" ]; then
+              ORIG_DTB="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" | head -1)"
+            fi
           fi
-          [ -f "$DTB_SRC" ] || { echo "No DTB found for: $MACHINE"; exit 1; }
-          echo "Using DTB: $DTB_SRC"
+          [ -f "$ORIG_DTB" ] || { echo "No DTB found"; exit 1; }
+          echo "Using DTB: $ORIG_DTB"
+
           DTB_SIZE=$(stat -c%s "$DTB_BIN")
           VFAT_SIZE_KB=$(( (DTB_SIZE + 1023) / 1024 ))
           [ "$VFAT_SIZE_KB" -lt 4096 ] && VFAT_SIZE_KB=4096
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count="$VFAT_SIZE_KB" status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" > /dev/null
-          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" "::combined-dtb.dtb"
+          mcopy -i "$WORKSPACE/new_dtb.bin" "$ORIG_DTB" "::combined-dtb.dtb"
+          echo "Contents of new dtb.bin:"
           mdir -i "$WORKSPACE/new_dtb.bin"
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
           echo "dtb.bin updated"
