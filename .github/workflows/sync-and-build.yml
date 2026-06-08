@@ -241,7 +241,7 @@ jobs:
           ORIG_CMD="$(tr -d '\0' < "$TMP_EFI/cmdline.txt")"
           echo "Original cmdline: $ORIG_CMD"
           CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | xargs)"
-          NEW_CMD="$CLEAN_CMD rootwait iommu.passthrough=1 arm-smmu.disable_bypass=0 break=mount"
+          NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused"
           echo "Final cmdline: $NEW_CMD"
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --devicetree "$DTB_SRC" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
           [ -f "$TMP_EFI/new_uki.efi" ] || { echo "ukify failed"; exit 1; }
