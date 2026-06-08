@@ -234,7 +234,7 @@ jobs:
           ORIG_CMD="$(tr -d '\0' < "$TMP_EFI/cmdline.txt")"
           echo "Original cmdline: $ORIG_CMD"
           CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | sed 's/clk_ignore_unused//g' | sed 's/pd_ignore_unused//g' | sed 's/ufshcd[.]use_blk_mq=[^ ]*//g' | xargs)"
-          NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused ufshcd.use_blk_mq=1"
+          NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused ufshcd.use_blk_mq=1 fw_devlink=off"
           echo "Final cmdline: $NEW_CMD"
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
           [ -f "$TMP_EFI/new_uki.efi" ] || { echo "ukify failed"; exit 1; }
@@ -253,21 +253,18 @@ jobs:
           set -euo pipefail
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
           [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
-          echo "Available DTBs in meta:"
-          find "$WORKSPACE/meta_dir/$MACHINE" -name "*.dtb" | sort || true
-          ORIG_DTB="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "*.dtb" ! -name "*.dtbo" | head -1)"
-          if [ -z "$ORIG_DTB" ]; then
-            echo "No .dtb files in meta — keeping original dtb.bin unchanged"
-            ls -lh "$DTB_BIN"
-            exit 0
+          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
+          if [ ! -f "$DTB_SRC" ]; then
+            DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" | head -1)"
           fi
-          echo "Using original meta DTB: $ORIG_DTB"
+          [ -f "$DTB_SRC" ] || { echo "No DTB found for: $MACHINE"; exit 1; }
+          echo "Using DTB: $DTB_SRC"
           DTB_SIZE=$(stat -c%s "$DTB_BIN")
           VFAT_SIZE_KB=$(( (DTB_SIZE + 1023) / 1024 ))
           [ "$VFAT_SIZE_KB" -lt 4096 ] && VFAT_SIZE_KB=4096
           dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count="$VFAT_SIZE_KB" status=none
           mkfs.vfat "$WORKSPACE/new_dtb.bin" > /dev/null
-          mcopy -i "$WORKSPACE/new_dtb.bin" "$ORIG_DTB" "::combined-dtb.dtb"
+          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" "::combined-dtb.dtb"
           mdir -i "$WORKSPACE/new_dtb.bin"
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
           echo "dtb.bin updated"
