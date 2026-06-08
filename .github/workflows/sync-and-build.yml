@@ -1,0 +1,344 @@
+name: Sync and Build
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      docker_image:
+        description: Docker image to use for the build
+        required: false
+        type: string
+        default: kmake-image:ver.1.0
+      build_matrix:
+        description: Build matrix for multi target builds
+        type: string
+        required: true
+
+permissions:
+  packages: read
+
+jobs:
+  sync-and-build:
+    runs-on:
+      group: GHA-video-Prd-SelfHosted-RG
+      labels: [self-hosted, video-prd-u2204-x64-large-od-ephem]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.build_matrix) }}
+
+    steps:
+      - name: Pull Docker image
+        uses: qualcomm-linux/kernel-config/.github/actions/pull_docker_image@main
+        with:
+          image: ${{ inputs.docker_image }}
+          registry: artifacts.codelinaro.org/clo-420-qli-registry
+
+      - name: Checkout Video Driver
+        uses: actions/checkout@v4
+        with:
+          path: video-driver
+          fetch-depth: 0
+
+      - name: Sync codebase
+        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinuxmain.root
+        with:
+          event_name: ${{ github.event_name }}
+          pr_ref: ${{ github.event.pull_request.head.ref }}
+          pr_repo: ${{ github.event.pull_request.head.repo.full_name }}
+          base_ref: ${{ github.ref_name }}
+          caller_workflow: build
+
+      - name: Build workspace
+        id: build_workspace
+        uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
+        with:
+          docker_image: ${{ inputs.docker_image }}
+          workspace_path: ${{ github.workspace }}
+
+      - name: Fix Workspace Ownership
+        if: always()
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE"
+
+      - name: Install helper tools
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y python3-pip mtools dosfstools e2tools e2fsprogs
+          python3 -m pip install --user -q pefile
+          curl -fsSL -o "$WORKSPACE/ukify.py" "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
+          chmod +x "$WORKSPACE/ukify.py"
+          echo "Helper tools installed"
+
+      - name: Download iris artifacts from S3
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKSPACE/downloads/iris_test_app"
+          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/iris_test_app/" "$WORKSPACE/downloads/iris_test_app/" --recursive
+          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/vpu20_1v.mbn" "$WORKSPACE/downloads/"
+          wget -q "https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz" -O "$WORKSPACE/downloads/video_clips_iris.tar.gz"
+          ls -lh "$WORKSPACE/downloads/iris_test_app/"
+          ls -lh "$WORKSPACE/downloads/vpu20_1v.mbn"
+          ls -lh "$WORKSPACE/downloads/video_clips_iris.tar.gz"
+
+      - name: Download target meta tar from S3
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          META_TAR: ${{ matrix.meta_tar }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          [ -n "$META_TAR" ] || { echo "meta_tar is empty"; exit 1; }
+          mkdir -p "$WORKSPACE/downloads" "$WORKSPACE/meta_dir"
+          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" "$WORKSPACE/downloads/$META_TAR"
+          rm -rf "$WORKSPACE/meta_dir/$MACHINE"
+          mkdir -p "$WORKSPACE/meta_dir/$MACHINE"
+          tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$WORKSPACE/meta_dir/$MACHINE"
+          find "$WORKSPACE/meta_dir/$MACHINE" -maxdepth 2 -type f | sort | head -100
+
+      - name: Inject artifacts into rootfs
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          META_DIR="$WORKSPACE/meta_dir/$MACHINE"
+          ROOTFS_IMG="$(find "$META_DIR" -name "rootfs.img" | head -1)"
+          [ -f "$ROOTFS_IMG" ] || { echo "rootfs.img not found"; exit 1; }
+          echo "Using rootfs image: $ROOTFS_IMG"
+
+          echo "Raw e2ls output of /usr/lib/modules:"
+          e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>&1 || true
+
+          KVER="$(e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')"
+
+          if [ -z "$KVER" ]; then
+            echo "e2ls empty, trying debugfs fallback..."
+            KVER="$(debugfs -R "ls -l /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')"
+          fi
+
+          if [ -z "$KVER" ]; then
+            KVER="$(debugfs -R "ls /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | grep -oE '[0-9]+[.][0-9]+[.][0-9][^ ]*' | head -1 | tr -d '[:space:]')"
+          fi
+
+          echo "Detected KVER: '$KVER'"
+          [ -n "$KVER" ] || { echo "Could not detect kernel version"; exit 1; }
+
+          debugfs -w -R "mkdir /usr/lib/modules/$KVER/updates" "$ROOTFS_IMG" 2>/dev/null || true
+          debugfs -w -R "mkdir /data" "$ROOTFS_IMG" 2>/dev/null || true
+          debugfs -w -R "mkdir /data/vendor" "$ROOTFS_IMG" 2>/dev/null || true
+          debugfs -w -R "mkdir /data/vendor/iris_test_app" "$ROOTFS_IMG" 2>/dev/null || true
+          debugfs -w -R "mkdir /data/vendor/iris_test_app/firmware" "$ROOTFS_IMG" 2>/dev/null || true
+          debugfs -w -R "write $WORKSPACE/video-driver/video/iris_vpu.ko /usr/lib/modules/$KVER/updates/iris_vpu.ko" "$ROOTFS_IMG"
+          echo "iris_vpu.ko injected"
+          debugfs -w -R "write $WORKSPACE/downloads/iris_test_app/iris_v4l2_test /data/vendor/iris_test_app/iris_v4l2_test" "$ROOTFS_IMG"
+          debugfs -w -R "set_inode_field /data/vendor/iris_test_app/iris_v4l2_test mode 0100755" "$ROOTFS_IMG" 2>/dev/null || true
+          echo "iris_v4l2_test injected"
+          debugfs -w -R "write $WORKSPACE/downloads/vpu20_1v.mbn /data/vendor/iris_test_app/firmware/vpu20_1v.mbn" "$ROOTFS_IMG"
+          echo "vpu20_1v.mbn injected"
+          debugfs -w -R "write $WORKSPACE/downloads/video_clips_iris.tar.gz /data/vendor/iris_test_app/video_clips_iris.tar.gz" "$ROOTFS_IMG"
+          echo "video_clips_iris.tar.gz injected"
+          e2fsck -p -f "$ROOTFS_IMG" || true
+          echo "rootfs.img updated successfully"
+          ls -lh "$ROOTFS_IMG"
+
+      - name: Rebuild efi.bin
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          META_DIR="$WORKSPACE/meta_dir/$MACHINE"
+          EFI_BIN="$(find "$META_DIR" -name "efi.bin" | head -1)"
+          TMP_EFI="$WORKSPACE/efi_rebuild/$MACHINE"
+          [ -f "$EFI_BIN" ] || { echo "efi.bin not found"; exit 1; }
+          KERNEL_SRC="$WORKSPACE/kobj/arch/arm64/boot/Image"
+          [ -f "$KERNEL_SRC" ] || { echo "Fresh kernel not found: $KERNEL_SRC"; exit 1; }
+          echo "Fresh kernel: $KERNEL_SRC ($(stat -c%s "$KERNEL_SRC") bytes)"
+          mkdir -p "$TMP_EFI"
+          mdir -i "$EFI_BIN" ::/EFI/Linux || { echo "Could not list EFI/Linux"; exit 1; }
+          UKI_NAME="$(mdir -i "$EFI_BIN" ::/EFI/Linux 2>/dev/null | awk '{print $NF}' | grep -i '\.efi$' | head -1)"
+          [ -n "$UKI_NAME" ] || { echo "No .efi file found"; exit 1; }
+          echo "Found UKI: $UKI_NAME"
+          mcopy -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" "$TMP_EFI/$UKI_NAME"
+          PYFILE="$TMP_EFI/extract_uki.py"
+          printf '%s\n' 'import os, pefile, struct' > "$PYFILE"
+          printf '%s\n' 'uki_path    = os.environ["UKI_PATH"]' >> "$PYFILE"
+          printf '%s\n' 'rebuild_dir = os.environ["REBUILD_DIR"]' >> "$PYFILE"
+          printf '%s\n' 'pe = pefile.PE(uki_path)' >> "$PYFILE"
+          printf '%s\n' 'with open(uki_path, "rb") as fh: raw = bytearray(fh.read())' >> "$PYFILE"
+          printf '%s\n' 'for sec in pe.sections:' >> "$PYFILE"
+          printf '%s\n' '    name = sec.Name.decode().rstrip(chr(0))' >> "$PYFILE"
+          printf '%s\n' '    data = sec.get_data()' >> "$PYFILE"
+          printf '%s\n' '    if name == ".initrd":' >> "$PYFILE"
+          printf '%s\n' '        open(os.path.join(rebuild_dir, "initrd.img"), "wb").write(data)' >> "$PYFILE"
+          printf '%s\n' '        print("Extracted .initrd: {} bytes".format(len(data)))' >> "$PYFILE"
+          printf '%s\n' '    elif name == ".cmdline":' >> "$PYFILE"
+          printf '%s\n' '        cleaned = data.rstrip(b"\x00")' >> "$PYFILE"
+          printf '%s\n' '        open(os.path.join(rebuild_dir, "cmdline.txt"), "wb").write(cleaned)' >> "$PYFILE"
+          printf '%s\n' '        print("Extracted .cmdline: {}".format(cleaned.decode(errors="replace")))' >> "$PYFILE"
+          printf '%s\n' 'keep = {".text", ".rodata", ".data", ".reloc", ".sdmagic"}' >> "$PYFILE"
+          printf '%s\n' 'stub_secs = [s for s in pe.sections if s.Name.decode().rstrip(chr(0)) in keep]' >> "$PYFILE"
+          printf '%s\n' 'if not stub_secs: raise SystemExit("No stub sections found")' >> "$PYFILE"
+          printf '%s\n' 'stub_end = max(s.PointerToRawData + s.SizeOfRawData for s in stub_secs)' >> "$PYFILE"
+          printf '%s\n' 'pe_off = struct.unpack_from("<I", raw, 0x3C)[0]' >> "$PYFILE"
+          printf '%s\n' 'num_sec_off = pe_off + 4 + 2' >> "$PYFILE"
+          printf '%s\n' 'opt_hdr_size = struct.unpack_from("<H", raw, pe_off + 4 + 16)[0]' >> "$PYFILE"
+          printf '%s\n' 'sec_table_off = pe_off + 4 + 20 + opt_hdr_size' >> "$PYFILE"
+          printf '%s\n' 'new_raw = bytearray(raw[:stub_end])' >> "$PYFILE"
+          printf '%s\n' 'struct.pack_into("<H", new_raw, num_sec_off, len(stub_secs))' >> "$PYFILE"
+          printf '%s\n' 'for i, s in enumerate(pe.sections):' >> "$PYFILE"
+          printf '%s\n' '    sname = s.Name.decode().rstrip(chr(0))' >> "$PYFILE"
+          printf '%s\n' '    if sname not in keep:' >> "$PYFILE"
+          printf '%s\n' '        eoff = sec_table_off + (i * 40)' >> "$PYFILE"
+          printf '%s\n' '        if eoff + 40 <= len(new_raw): new_raw[eoff:eoff+40] = b"\x00" * 40' >> "$PYFILE"
+          printf '%s\n' 'soi_off = pe_off + 4 + 20 + 56' >> "$PYFILE"
+          printf '%s\n' 'new_size = (stub_end + 0xFFF) & ~0xFFF' >> "$PYFILE"
+          printf '%s\n' 'struct.pack_into("<I", new_raw, soi_off, new_size)' >> "$PYFILE"
+          printf '%s\n' 'open(os.path.join(rebuild_dir, "stub.efi"), "wb").write(new_raw)' >> "$PYFILE"
+          printf '%s\n' 'print("Extracted stub.efi: {} bytes".format(len(new_raw)))' >> "$PYFILE"
+          export UKI_PATH="$TMP_EFI/$UKI_NAME"
+          export REBUILD_DIR="$TMP_EFI"
+          python3 "$PYFILE"
+          for f in initrd.img cmdline.txt stub.efi; do
+            [ -f "$TMP_EFI/$f" ] || { echo "Missing: $f"; exit 1; }
+          done
+          echo "All UKI sections extracted"
+          ALIGNED_IMAGE="$TMP_EFI/Image.aligned"
+          cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
+          IMAGE_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
+          ALIGNED_SIZE=$(( (IMAGE_SIZE + 65535) & ~65535 ))
+          if [ "$IMAGE_SIZE" -ne "$ALIGNED_SIZE" ]; then
+            truncate -s "$ALIGNED_SIZE" "$ALIGNED_IMAGE"
+          fi
+          FINAL_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
+          if (( FINAL_SIZE % 65536 != 0 )); then
+            echo "Kernel alignment FAILED"; exit 1
+          fi
+          echo "Kernel aligned: $FINAL_SIZE bytes"
+          ORIG_CMD="$(tr -d '\0' < "$TMP_EFI/cmdline.txt")"
+          echo "Original cmdline: $ORIG_CMD"
+          CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | sed 's/clk_ignore_unused//g' | sed 's/pd_ignore_unused//g' | sed 's/ufshcd[.]use_blk_mq=[^ ]*//g' | xargs)"
+          NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused ufshcd.use_blk_mq=1"
+          echo "Final cmdline: $NEW_CMD"
+          python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
+          [ -f "$TMP_EFI/new_uki.efi" ] || { echo "ukify failed"; exit 1; }
+          echo "New UKI: $(stat -c%s "$TMP_EFI/new_uki.efi") bytes"
+          mdel -i "$EFI_BIN" "::/EFI/Linux/$UKI_NAME" 2>/dev/null || true
+          mcopy -i "$EFI_BIN" "$TMP_EFI/new_uki.efi" "::/EFI/Linux/$UKI_NAME"
+          echo "efi.bin patched"
+          ls -lh "$EFI_BIN"
+
+      - name: Rebuild dtb.bin
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
+          [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
+          DTB_SIZE=$(stat -c%s "$DTB_BIN")
+          VFAT_SIZE_KB=$(( (DTB_SIZE + 1023) / 1024 ))
+          [ "$VFAT_SIZE_KB" -lt 4096 ] && VFAT_SIZE_KB=4096
+          dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count="$VFAT_SIZE_KB" status=none
+          mkfs.vfat "$WORKSPACE/new_dtb.bin" > /dev/null
+          echo "Available DTBs in meta:"
+          find "$WORKSPACE/meta_dir/$MACHINE" -name "*.dtb" | sort
+          ORIG_DTB="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "*.dtb" ! -name "*.dtbo" | head -1)"
+          [ -f "$ORIG_DTB" ] || { echo "No original DTB found in meta for: $MACHINE"; exit 1; }
+          echo "Using original meta DTB: $ORIG_DTB"
+          mcopy -i "$WORKSPACE/new_dtb.bin" "$ORIG_DTB" "::combined-dtb.dtb"
+          echo "Contents of new dtb.bin:"
+          mdir -i "$WORKSPACE/new_dtb.bin"
+          cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
+          echo "dtb.bin updated"
+          ls -lh "$DTB_BIN"
+
+      - name: Repack updated meta tar
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          META_TAR: ${{ matrix.meta_tar }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          OUTDIR="$WORKSPACE/output"
+          mkdir -p "$OUTDIR"
+          FINAL_TAR="$OUTDIR/$META_TAR"
+          rm -f "$FINAL_TAR"
+          tar -C "$WORKSPACE/meta_dir/$MACHINE" -cf "$FINAL_TAR" .
+          ls -lh "$FINAL_TAR"
+
+      - name: Append artifacts to S3 upload list
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          META_TAR: ${{ matrix.meta_tar }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKSPACE/artifacts"
+          FILE_LIST="$WORKSPACE/artifacts/file_list.txt"
+          : > "$FILE_LIST"
+          FINAL_TAR="$WORKSPACE/output/$META_TAR"
+          [ -f "$FINAL_TAR" ] || { echo "Missing: $FINAL_TAR"; exit 1; }
+          echo "$FINAL_TAR" >> "$FILE_LIST"
+          cat "$FILE_LIST"
+
+      - name: Upload updated meta to S3
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@video.qclinuxmain.root
+        with:
+          s3_bucket: qli-prd-video-gh-artifacts
+          local_file: ${{ github.workspace }}/artifacts/file_list.txt
+          mode: multi-upload
+          upload_location: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Clean up
+        if: always()
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ws="$WORKSPACE"
+          rm -rf "$ws/artifacts" "$ws/downloads" "$ws/kobj" "$ws/meta_dir" "$ws/output" "$ws/efi_rebuild" || true
+          rm -f "$ws/ukify.py" "$ws/new_dtb.bin" || true
+          echo "Cleanup complete"
+
+      - name: Update summary
+        if: success() || failure()
+        shell: bash
+        env:
+          BUILD_STATUS: ${{ steps.build_workspace.outcome }}
+          MACHINE: ${{ matrix.machine }}
+          META_TAR: ${{ matrix.meta_tar }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_STATUS" = "success" ]; then
+            summary=":heavy_check_mark: Build Success"
+          else
+            summary=":x: Build Failed"
+          fi
+          {
+            echo "<details><summary><i>Build Summary</i></summary>"
+            echo "$summary"
+            echo ""
+            echo "- Machine: $MACHINE"
+            echo "- Meta tar: $META_TAR"
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
