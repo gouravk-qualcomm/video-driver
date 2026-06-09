@@ -235,6 +235,9 @@ jobs:
           echo "Original cmdline: $ORIG_CMD"
           CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | sed 's/clk_ignore_unused//g' | sed 's/pd_ignore_unused//g' | sed 's/fw_devlink=[^ ]*//g' | sed 's/regulator_ignore_unused//g' | sed 's/initcall_blacklist=[^ ]*//g' | sed 's/ufshcd[.][^ ]*=[^ ]*//g' | xargs)"
           NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused fw_devlink=off regulator_ignore_unused"
+          echo "$NEW_CMD" | grep -q "fw_devlink=off" || { echo "fw_devlink=off MISSING from cmdline!"; exit 1; }
+          echo "$NEW_CMD" | grep -q "rootwait" || { echo "rootwait MISSING from cmdline!"; exit 1; }
+          echo "Cmdline verified OK"
           echo "Final cmdline: $NEW_CMD"
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
           [ -f "$TMP_EFI/new_uki.efi" ] || { echo "ukify failed"; exit 1; }
@@ -286,6 +289,7 @@ jobs:
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
           echo "dtb.bin updated"
           ls -lh "$DTB_BIN"
+
       - name: Repack updated meta tar
         shell: bash
         env:
