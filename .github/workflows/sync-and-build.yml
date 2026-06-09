@@ -244,7 +244,7 @@ jobs:
           echo "efi.bin patched"
           ls -lh "$EFI_BIN"
 
-            - name: Rebuild dtb.bin
+      - name: Rebuild dtb.bin
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
