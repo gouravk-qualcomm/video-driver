@@ -219,6 +219,27 @@ jobs:
             [ -f "$TMP_EFI/$f" ] || { echo "Missing: $f"; exit 1; }
           done
           echo "All UKI sections extracted"
+                    # ── Patch GRUB timeout to 0 inside initrd ─────────────────────
+          echo "Patching GRUB timeout in initrd..."
+          mkdir -p "$TMP_EFI/initrd_work"
+          cd "$TMP_EFI/initrd_work"
+          zcat "$TMP_EFI/initrd.img" | cpio -id 2>/dev/null || \
+            cat "$TMP_EFI/initrd.img" | cpio -id 2>/dev/null || true
+          GRUB_CFGS="$(find . -name "grub.cfg" 2>/dev/null)"
+          if [ -n "$GRUB_CFGS" ]; then
+            echo "$GRUB_CFGS" | while read gcfg; do
+              sed -i 's/set timeout=-1/set timeout=0/g' "$gcfg"
+              sed -i 's/timeout=-1/timeout=0/g' "$gcfg"
+              echo "Patched GRUB timeout: $gcfg"
+            done
+            find . | cpio -o -H newc 2>/dev/null | gzip > "$TMP_EFI/initrd.patched.img"
+            mv "$TMP_EFI/initrd.patched.img" "$TMP_EFI/initrd.img"
+            echo "initrd repacked with timeout=0"
+          else
+            echo "No grub.cfg found in initrd — skipping timeout patch"
+          fi
+          cd "$WORKSPACE"
+          # ─────────────────────────────────────────────────────────────
           ALIGNED_IMAGE="$TMP_EFI/Image.aligned"
           cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
           IMAGE_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
@@ -276,6 +297,13 @@ jobs:
               && echo "Disabled: wcn6855-pmu" \
               || echo "Skip: wcn6855-pmu not found at root"
             echo "QCS8300 DTB patched"
+          fi
+          if echo "$MACHINE" | grep -q "qcs9100"; then
+            echo "Patching QCS9100 DTB: disabling a90000.i2c (blocks UFS ICC)..."
+            fdtput -t s "$DTB_SRC" "/soc@0/i2c@a90000" "status" "disabled" 2>/dev/null \
+              && echo "Disabled: a90000.i2c" \
+              || echo "Skip: a90000.i2c not found at /soc@0/i2c@a90000"
+            echo "QCS9100 DTB patched"
           fi
 
           DTB_SIZE=$(stat -c%s "$DTB_BIN")
