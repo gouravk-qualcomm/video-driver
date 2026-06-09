@@ -237,7 +237,8 @@ jobs:
           if echo "$MACHINE" | grep -q "qcs8300"; then
             NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused fw_devlink=off regulator_ignore_unused"
           else
-            NEW_CMD="$CLEAN_CMD rootdelay=10 rootwait"
+            # QCS9100 needs longer delay due to SMMU deferred probe at ~21s
+            NEW_CMD="$CLEAN_CMD rootdelay=30 rootwait"
           fi
           echo "Final cmdline: $NEW_CMD"
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
