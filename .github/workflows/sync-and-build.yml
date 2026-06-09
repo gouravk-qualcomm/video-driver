@@ -234,12 +234,7 @@ jobs:
           ORIG_CMD="$(tr -d '\0' < "$TMP_EFI/cmdline.txt")"
           echo "Original cmdline: $ORIG_CMD"
           CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | sed 's/clk_ignore_unused//g' | sed 's/pd_ignore_unused//g' | sed 's/fw_devlink=[^ ]*//g' | sed 's/regulator_ignore_unused//g' | sed 's/initcall_blacklist=[^ ]*//g' | sed 's/ufshcd[.][^ ]*=[^ ]*//g' | xargs)"
-          if echo "$MACHINE" | grep -q "qcs8300"; then
-            NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused fw_devlink=off regulator_ignore_unused"
-          else
-            # QCS9100 needs longer delay due to SMMU deferred probe at ~21s
-            NEW_CMD="$CLEAN_CMD rootdelay=30 rootwait"
-          fi
+          NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused fw_devlink=off regulator_ignore_unused"
           echo "Final cmdline: $NEW_CMD"
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
           [ -f "$TMP_EFI/new_uki.efi" ] || { echo "ukify failed"; exit 1; }
@@ -249,7 +244,7 @@ jobs:
           echo "efi.bin patched"
           ls -lh "$EFI_BIN"
 
-      - name: Rebuild dtb.bin
+            - name: Rebuild dtb.bin
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -267,10 +262,16 @@ jobs:
 
           if echo "$MACHINE" | grep -q "qcs8300"; then
             echo "Patching QCS8300 DTB: adding regulator-always-on to vreg_conn nodes..."
-            for regname in regulator-conn-1p05 regulator-conn-1p35 regulator-conn-1p8 regulator-conn-1p95 regulator-conn-pa; do
-              fdtput -t s "$DTB_SRC" "/$regname" "regulator-always-on" "" 2>/dev/null && echo "Patched always-on: $regname" || echo "Skip (not found): $regname"
+            for regname in regulator-conn-1p05 regulator-conn-1p35 \
+                           regulator-conn-1p8 regulator-conn-1p95 \
+                           regulator-conn-pa; do
+              fdtput -t s "$DTB_SRC" "/$regname" "regulator-always-on" "" 2>/dev/null \
+                && echo "Patched always-on: $regname" \
+                || echo "Skip (not found at root): $regname"
             done
-            fdtput -t s "$DTB_SRC" "/wcn6855-pmu" "status" "disabled" 2>/dev/null && echo "Disabled: wcn6855-pmu" || echo "Skip: wcn6855-pmu not found at root"
+            fdtput -t s "$DTB_SRC" "/wcn6855-pmu" "status" "disabled" 2>/dev/null \
+              && echo "Disabled: wcn6855-pmu" \
+              || echo "Skip: wcn6855-pmu not found at root"
             echo "QCS8300 DTB patched"
           fi
 
@@ -285,7 +286,6 @@ jobs:
           cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
           echo "dtb.bin updated"
           ls -lh "$DTB_BIN"
-
       - name: Repack updated meta tar
         shell: bash
         env:
