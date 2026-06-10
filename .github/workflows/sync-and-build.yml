@@ -307,9 +307,13 @@ jobs:
             echo "Patching QCS9100 DTB: disabling a90000.i2c (blocks UFS ICC)..."
             fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@a90000" "status" "disabled" 2>/dev/null \
               && echo "Disabled: a90000.i2c" \
-              || echo "Skip: a90000.i2c not found at /soc@0/i2c@a90000"
+            # Also disable the geniqup parent node
+            fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000" "status" "disabled" 2>/dev/null \
+              && echo "Disabled: geniqup@ac0000" \
+              || echo "Skip: geniqup@ac0000 not found"
             echo "QCS9100 DTB patched"
           fi
+
 
           DTB_SIZE=$(stat -c%s "$DTB_BIN")
           VFAT_SIZE_KB=$(( (DTB_SIZE + 1023) / 1024 ))
