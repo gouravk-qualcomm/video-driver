@@ -283,7 +283,12 @@ jobs:
           fi
           [ -f "$DTB_SRC" ] || { echo "No DTB found for: $MACHINE"; exit 1; }
           echo "Using DTB: $DTB_SRC"
-
+          # ── DTB Debug ──────────────────────────────────────────────────
+          echo "All DTB nodes containing 'i2c' (QCS9100 debug):"
+          fdtdump "$DTB_SRC" 2>/dev/null | grep -i "i2c@a9" | head -10 || true
+          echo "All DTB nodes containing 'regulator-conn/vreg/wcn' (QCS8300 debug):"
+          fdtdump "$DTB_SRC" 2>/dev/null | grep -i "regulator-conn\|vreg_conn\|wcn6855" | head -10 || true
+          # ───────────────────────────────────────────────────────────────
           if echo "$MACHINE" | grep -q "qcs8300"; then
             echo "Patching QCS8300 DTB: adding regulator-always-on to vreg_conn nodes..."
             for regname in regulator-conn-1p05 regulator-conn-1p35 \
@@ -300,7 +305,7 @@ jobs:
           fi
           if echo "$MACHINE" | grep -q "qcs9100"; then
             echo "Patching QCS9100 DTB: disabling a90000.i2c (blocks UFS ICC)..."
-            fdtput -t s "$DTB_SRC" "/soc@0/i2c@a90000" "status" "disabled" 2>/dev/null \
+            fdtput -t s "$DTB_SRC" "/soc@0/i2c@a900000" "status" "disabled" 2>/dev/null \
               && echo "Disabled: a90000.i2c" \
               || echo "Skip: a90000.i2c not found at /soc@0/i2c@a90000"
             echo "QCS9100 DTB patched"
