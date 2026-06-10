@@ -120,24 +120,18 @@ jobs:
           ROOTFS_IMG="$(find "$META_DIR" -name "rootfs.img" | head -1)"
           [ -f "$ROOTFS_IMG" ] || { echo "rootfs.img not found"; exit 1; }
           echo "Using rootfs image: $ROOTFS_IMG"
-
           echo "Raw e2ls output of /usr/lib/modules:"
           e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>&1 || true
-
           KVER="$(e2ls "$ROOTFS_IMG:/usr/lib/modules" 2>/dev/null | grep -v '^\.' | grep -v '^$' | head -1 | tr -d '[:space:]')"
-
           if [ -z "$KVER" ]; then
             echo "e2ls empty, trying debugfs fallback..."
             KVER="$(debugfs -R "ls -l /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | awk '{print $NF}' | grep '^[0-9]' | head -1 | tr -d '[:space:]')"
           fi
-
           if [ -z "$KVER" ]; then
             KVER="$(debugfs -R "ls /usr/lib/modules" "$ROOTFS_IMG" 2>/dev/null | grep -oE '[0-9]+[.][0-9]+[.][0-9][^ ]*' | head -1 | tr -d '[:space:]')"
           fi
-
           echo "Detected KVER: '$KVER'"
           [ -n "$KVER" ] || { echo "Could not detect kernel version"; exit 1; }
-
           debugfs -w -R "mkdir /usr/lib/modules/$KVER/updates" "$ROOTFS_IMG" 2>/dev/null || true
           debugfs -w -R "mkdir /data" "$ROOTFS_IMG" 2>/dev/null || true
           debugfs -w -R "mkdir /data/vendor" "$ROOTFS_IMG" 2>/dev/null || true
@@ -219,12 +213,10 @@ jobs:
             [ -f "$TMP_EFI/$f" ] || { echo "Missing: $f"; exit 1; }
           done
           echo "All UKI sections extracted"
-                    # ── Patch GRUB timeout to 0 inside initrd ─────────────────────
           echo "Patching GRUB timeout in initrd..."
           mkdir -p "$TMP_EFI/initrd_work"
           cd "$TMP_EFI/initrd_work"
-          zcat "$TMP_EFI/initrd.img" | cpio -id 2>/dev/null || \
-            cat "$TMP_EFI/initrd.img" | cpio -id 2>/dev/null || true
+          zcat "$TMP_EFI/initrd.img" | cpio -id 2>/dev/null || cat "$TMP_EFI/initrd.img" | cpio -id 2>/dev/null || true
           GRUB_CFGS="$(find . -name "grub.cfg" 2>/dev/null)"
           if [ -n "$GRUB_CFGS" ]; then
             echo "$GRUB_CFGS" | while read gcfg; do
@@ -236,10 +228,9 @@ jobs:
             mv "$TMP_EFI/initrd.patched.img" "$TMP_EFI/initrd.img"
             echo "initrd repacked with timeout=0"
           else
-            echo "No grub.cfg found in initrd — skipping timeout patch"
+            echo "No grub.cfg found in initrd"
           fi
           cd "$WORKSPACE"
-          # ─────────────────────────────────────────────────────────────
           ALIGNED_IMAGE="$TMP_EFI/Image.aligned"
           cp "$KERNEL_SRC" "$ALIGNED_IMAGE"
           IMAGE_SIZE=$(stat -c%s "$ALIGNED_IMAGE")
@@ -255,9 +246,9 @@ jobs:
           ORIG_CMD="$(tr -d '\0' < "$TMP_EFI/cmdline.txt")"
           echo "Original cmdline: $ORIG_CMD"
           CLEAN_CMD="$(echo "$ORIG_CMD" | sed 's/rootdelay=[^ ]*//g' | sed 's/rootwait//g' | sed 's/iommu[.]passthrough=[^ ]*//g' | sed 's/arm-smmu[.]disable_bypass=[^ ]*//g' | sed 's/break=[^ ]*//g' | sed 's/clk_ignore_unused//g' | sed 's/pd_ignore_unused//g' | sed 's/fw_devlink=[^ ]*//g' | sed 's/regulator_ignore_unused//g' | sed 's/initcall_blacklist=[^ ]*//g' | sed 's/ufshcd[.][^ ]*=[^ ]*//g' | xargs)"
-          NEW_CMD="$CLEAN_CMD rootwait clk_ignore_unused pd_ignore_unused fw_devlink=off regulator_ignore_unused"
-          echo "$NEW_CMD" | grep -q "fw_devlink=off" || { echo "fw_devlink=off MISSING from cmdline!"; exit 1; }
-          echo "$NEW_CMD" | grep -q "rootwait" || { echo "rootwait MISSING from cmdline!"; exit 1; }
+          NEW_CMD="$CLEAN_CMD rootdelay=10 rootwait clk_ignore_unused pd_ignore_unused fw_devlink=off regulator_ignore_unused"
+          echo "$NEW_CMD" | grep -q "fw_devlink=off" || { echo "fw_devlink=off MISSING!"; exit 1; }
+          echo "$NEW_CMD" | grep -q "rootwait" || { echo "rootwait MISSING!"; exit 1; }
           echo "Cmdline verified OK"
           echo "Final cmdline: $NEW_CMD"
           python3 "$WORKSPACE/ukify.py" build --linux "$ALIGNED_IMAGE" --initrd "$TMP_EFI/initrd.img" --cmdline "$NEW_CMD" --stub "$TMP_EFI/stub.efi" --output "$TMP_EFI/new_uki.efi"
@@ -277,55 +268,56 @@ jobs:
           set -euo pipefail
           DTB_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "dtb.bin" | head -1)"
           [ -f "$DTB_BIN" ] || { echo "dtb.bin not found"; exit 1; }
-          DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
-          if [ ! -f "$DTB_SRC" ]; then
-            DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" | head -1)"
-          fi
-          [ -f "$DTB_SRC" ] || { echo "No DTB found for: $MACHINE"; exit 1; }
-          echo "Using DTB: $DTB_SRC"
-          # ── DTB Debug ──────────────────────────────────────────────────
-          echo "All DTB nodes containing 'i2c' (QCS9100 debug):"
-          fdtdump "$DTB_SRC" 2>/dev/null | grep -i "i2c@a9" | head -10 || true
-          echo "All DTB nodes containing 'regulator-conn/vreg/wcn' (QCS8300 debug):"
-          fdtdump "$DTB_SRC" 2>/dev/null | grep -i "regulator-conn\|vreg_conn\|wcn6855" | head -10 || true
-          # ───────────────────────────────────────────────────────────────
-          if echo "$MACHINE" | grep -q "qcs8300"; then
-            echo "Patching QCS8300 DTB: adding regulator-always-on to vreg_conn nodes..."
-            for regname in regulator-conn-1p05 regulator-conn-1p35 \
-                           regulator-conn-1p8 regulator-conn-1p95 \
-                           regulator-conn-pa; do
-              fdtput -t s "$DTB_SRC" "/$regname" "regulator-always-on" "" 2>/dev/null \
-                && echo "Patched always-on: $regname" \
-                || echo "Skip (not found at root): $regname"
-            done
-            fdtput -t s "$DTB_SRC" "/wcn6855-pmu" "status" "disabled" 2>/dev/null \
-              && echo "Disabled: wcn6855-pmu" \
-              || echo "Skip: wcn6855-pmu not found at root"
-            echo "QCS8300 DTB patched"
-          fi
-          if echo "$MACHINE" | grep -q "qcs9100"; then
-            echo "Patching QCS9100 DTB: disabling a90000.i2c (blocks UFS ICC)..."
-            fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@a90000" "status" "disabled" 2>/dev/null \
-              && echo "Disabled: a90000.i2c" \
-            # Also disable the geniqup parent node
-            fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000" "status" "disabled" 2>/dev/null \
-              && echo "Disabled: geniqup@ac0000" \
-              || echo "Skip: geniqup@ac0000 not found"
-            echo "QCS9100 DTB patched"
-          fi
 
-
-          DTB_SIZE=$(stat -c%s "$DTB_BIN")
-          VFAT_SIZE_KB=$(( (DTB_SIZE + 1023) / 1024 ))
-          [ "$VFAT_SIZE_KB" -lt 4096 ] && VFAT_SIZE_KB=4096
-          dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count="$VFAT_SIZE_KB" status=none
-          mkfs.vfat "$WORKSPACE/new_dtb.bin" > /dev/null
-          mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" "::combined-dtb.dtb"
-          echo "Contents of new dtb.bin:"
-          mdir -i "$WORKSPACE/new_dtb.bin"
-          cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
-          echo "dtb.bin updated"
-          ls -lh "$DTB_BIN"
+          echo "Checking for pre-built VFAT image in meta..."
+          VFAT_SRC="$(find "$WORKSPACE/meta_dir/$MACHINE" -name "*.vfat" 2>/dev/null | head -1)"
+          if [ -f "$VFAT_SRC" ]; then
+            echo "Using pre-built VFAT: $VFAT_SRC"
+            cp -fv "$VFAT_SRC" "$DTB_BIN"
+            echo "dtb.bin updated from pre-built VFAT"
+            ls -lh "$DTB_BIN"
+          else
+            echo "No pre-built VFAT found — using compiled DTB with patches"
+            DTB_SRC="$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/${MACHINE}.dtb"
+            if [ ! -f "$DTB_SRC" ]; then
+              DTB_SRC="$(find "$WORKSPACE/kobj/arch/arm64/boot/dts/qcom/" -name "${MACHINE}*.dtb" | head -1)"
+            fi
+            [ -f "$DTB_SRC" ] || { echo "No DTB found for: $MACHINE"; exit 1; }
+            echo "Using DTB: $DTB_SRC"
+            echo "All DTB nodes containing i2c (QCS9100 debug):"
+            fdtdump "$DTB_SRC" 2>/dev/null | grep -i "i2c@a9" | head -10 || true
+            echo "All DTB nodes containing regulator-conn/vreg/wcn (QCS8300 debug):"
+            fdtdump "$DTB_SRC" 2>/dev/null | grep -i "regulator-conn\|vreg_conn\|wcn6855" | head -10 || true
+            if echo "$MACHINE" | grep -q "qcs8300"; then
+              echo "Patching QCS8300 DTB..."
+              for regname in regulator-conn-1p05 regulator-conn-1p35 regulator-conn-1p8 regulator-conn-1p95 regulator-conn-pa; do
+                fdtput -t s "$DTB_SRC" "/$regname" "regulator-always-on" "" 2>/dev/null \
+                  && echo "Patched always-on: $regname" || echo "Skip: $regname not found"
+              done
+              fdtput -t s "$DTB_SRC" "/wcn6855-pmu" "status" "disabled" 2>/dev/null \
+                && echo "Disabled: wcn6855-pmu" || echo "Skip: wcn6855-pmu not found"
+              echo "QCS8300 DTB patched"
+            fi
+            if echo "$MACHINE" | grep -q "qcs9100"; then
+              echo "Patching QCS9100 DTB..."
+              fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@a90000" "status" "disabled" 2>/dev/null \
+                && echo "Disabled: i2c@a90000" || echo "Skip: i2c@a90000 not found"
+              fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000" "status" "disabled" 2>/dev/null \
+                && echo "Disabled: geniqup@ac0000" || echo "Skip: geniqup@ac0000 not found"
+              echo "QCS9100 DTB patched"
+            fi
+            DTB_SIZE=$(stat -c%s "$DTB_BIN")
+            VFAT_SIZE_KB=$(( (DTB_SIZE + 1023) / 1024 ))
+            [ "$VFAT_SIZE_KB" -lt 4096 ] && VFAT_SIZE_KB=4096
+            dd if=/dev/zero of="$WORKSPACE/new_dtb.bin" bs=1K count="$VFAT_SIZE_KB" status=none
+            mkfs.vfat "$WORKSPACE/new_dtb.bin" > /dev/null
+            mcopy -i "$WORKSPACE/new_dtb.bin" "$DTB_SRC" "::combined-dtb.dtb"
+            echo "Contents of new dtb.bin:"
+            mdir -i "$WORKSPACE/new_dtb.bin"
+            cp -fv "$WORKSPACE/new_dtb.bin" "$DTB_BIN"
+            echo "dtb.bin updated"
+            ls -lh "$DTB_BIN"
+          fi
 
       - name: Repack updated meta tar
         shell: bash
