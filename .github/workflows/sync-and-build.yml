@@ -51,15 +51,6 @@ jobs:
           path: video-driver
           fetch-depth: 0
 
-      - name: Sync codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@video.qclinuxmain.root
-        with:
-          event_name: ${{ github.event_name }}
-          pr_ref: ${{ github.event.pull_request.head.ref }}
-          pr_repo: ${{ github.event.pull_request.head.repo.full_name }}
-          base_ref: ${{ github.ref_name }}
-          caller_workflow: build
-
       - name: Build workspace
         id: build_workspace
         uses: qualcomm-linux/video-driver/.github/actions/build@video.qclinuxmain.root
@@ -70,53 +61,45 @@ jobs:
       - name: Fix Workspace Ownership
         if: always()
         shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE"
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ github.workspace }}"
 
       - name: Install helper tools
         shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
           sudo apt-get update -q
-          sudo apt-get install -y python3-pip mtools dosfstools e2tools e2fsprogs device-tree-compiler
+          sudo apt-get install -y python3-pip mtools device-tree-compiler
           python3 -m pip install --user -q pefile
-          curl -fsSL -o "$WORKSPACE/ukify.py" "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
-          chmod +x "$WORKSPACE/ukify.py"
+          curl -fsSL -o "ukify.py" "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
+          chmod +x "ukify.py"
 
-      - name: Download target meta tar from S3
+      - name: Download target meta tar
         shell: bash
         env:
-          WORKSPACE: ${{ github.workspace }}
           META_TAR: ${{ matrix.meta_tar }}
           MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
-          [ -n "$META_TAR" ] || { echo "meta_tar is empty"; exit 1; }
-          mkdir -p "$WORKSPACE/downloads" "$WORKSPACE/meta_dir"
-          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" "$WORKSPACE/downloads/$META_TAR"
-          rm -rf "$WORKSPACE/meta_dir/$MACHINE"
-          mkdir -p "$WORKSPACE/meta_dir/$MACHINE"
-          tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$WORKSPACE/meta_dir/$MACHINE"
+          mkdir -p "meta_dir/$MACHINE"
+          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/meta/$META_TAR" "downloads/$META_TAR"
+          tar -xf "downloads/$META_TAR" -C "meta_dir/$MACHINE"
 
-      - name: Locate and Extract Kernel Components
+      - name: Extract, Align, and Patch UKI
         shell: bash
         env:
-          WORKSPACE: ${{ github.workspace }}
           MACHINE: ${{ matrix.machine }}
+          WORKSPACE: ${{ github.workspace }}
         run: |
-          set -euo pipefail
-
-          # 1. Locate artifacts
-          EFI_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -type f \( -name 'efi.bin' -o -name '*.efi' \) | head -n 1)"
-          DTB_SRC="$(find "$WORKSPACE" -type f -name '*.dtb' | head -n 1)"
+          set -eu # Removed pipefail to avoid 'find | head' broken pipe error
           
-          # 2. Extract Kernel (.linux) and Initrd (.initrd) from the existing UKI
-          # This ensures we have the raw components to rebuild correctly.
+          # 1. Robustly locate artifacts
+          EFI_BIN=$(find "meta_dir/$MACHINE" -type f \( -name 'efi.bin' -o -name '*.efi' \) -print -quit)
+          DTB_SRC=$(find "video-driver" -type f -name "*.dtb" -print -quit)
+          
+          echo "Processing EFI: $EFI_BIN"
+          echo "Processing DTB: $DTB_SRC"
+
+          # 2. Extract Kernel and Initrd using pefile
           python3 - <<EOF
           import pefile
           import os
@@ -131,85 +114,44 @@ jobs:
                       with open('initrd.bin', 'wb') as f: f.write(section.get_data())
           EOF
 
-          # 3. Fix 64K Alignment (Prevents FIRMWARE BUG)
+          # 3. Mandatory 64K Alignment (Fixes "FIRMWARE BUG")
           if [ -f vmlinuz.bin ]; then
             truncate -s %65536 vmlinuz.bin
+            echo "Kernel aligned to 64K"
           fi
 
-          echo "EFI_BIN=$EFI_BIN" >> "$GITHUB_ENV"
-          echo "DTB_SRC=$DTB_SRC" >> "$GITHUB_ENV"
-
-      - name: Patch QCS9100 DTB (Disable Stalling I2C)
-        if: contains(matrix.machine, 'qcs9100') || contains(matrix.machine, 'lemans')
-        shell: bash
-        env:
-          DTB_SRC: ${{ env.DTB_SRC }}
-        run: |
-          set -euo pipefail
-          # Disable nodes causing "sync_state() pending"
-          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@a90000" "status" "disabled" 2>/dev/null || true
-          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@890000" "status" "disabled" 2>/dev/null || true
-          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000" "status" "disabled" 2>/dev/null || true
-          echo "QCS9100 DTB patched: I2C disabled"
-
-      - name: Patch QCS8300 Regulators (Force Always-On)
-        if: contains(matrix.machine, 'qcs8300') || contains(matrix.machine, 'monaco')
-        shell: bash
-        env:
-          DTB_SRC: ${{ env.DTB_SRC }}
-        run: |
-          set -euo pipefail
-          # Correct paths for Monaco RPMH regulators
-          REG_BASE="/soc@0/qcom,rpmh-regulators/regulators"
-          for node in "conn-lp05" "conn-lp35" "conn-lp95"; do
-            fdtput -t s "$DTB_SRC" "$REG_BASE/$node" "regulator-always-on" "" 2>/dev/null || true
-            fdtput -t s "$DTB_SRC" "$REG_BASE/$node" "regulator-boot-on" "" 2>/dev/null || true
-          done
-          fdtput -t s "$DTB_SRC" "/soc@0/wcn6855-pmu" "status" "disabled" 2>/dev/null || true
-          echo "QCS8300 DTB patched: Regulators forced on"
-
-      - name: Build updated UKI
-        shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
-          DTB_SRC: ${{ env.DTB_SRC }}
-          MACHINE: ${{ matrix.machine }}
-        run: |
-          set -euo pipefail
-
-          # Set Command Line
-          CMDLINE="rootwait clk_ignore_unused pd_ignore_unused regulator_ignore_unused"
+          # 4. Platform Specific Patches
+          CLEAN_CMD="rootwait clk_ignore_unused pd_ignore_unused regulator_ignore_unused"
+          
           if [[ "$MACHINE" == *"qcs9100"* ]]; then
-            CMDLINE="$CMDLINE rootdelay=10 fw_devlink=off"
+            # Bypass I2C sync_state stall seen in logs
+            NEW_CMD="$CLEAN_CMD rootdelay=10 fw_devlink=off"
+            fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@a90000" "status" "disabled" 2>/dev/null || true
+          elif [[ "$MACHINE" == *"qcs8300"* ]]; then
+            # Prevent regulator disable hang seen in logs
+            NEW_CMD="$CLEAN_CMD"
+            for node in "/soc@0/qcom,rpmh-regulators/regulator-conn-lp05" "/soc@0/qcom,rpmh-regulators/regulator-conn-lp35" "/soc@0/qcom,rpmh-regulators/regulator-conn-lp95"; do
+              fdtput -t s "$DTB_SRC" "$node" "regulator-always-on" "" 2>/dev/null || true
+            done
+            fdtput -t s "$DTB_SRC" "/soc@0/wcn6855-pmu" "status" "disabled" 2>/dev/null || true
+          else
+            NEW_CMD="$CLEAN_CMD"
           fi
 
-          OUTDIR="$WORKSPACE/uki_out"
-          mkdir -p "$OUTDIR"
-          echo "$CMDLINE" > "$OUTDIR/cmdline.txt"
-
-          # Prepare arguments
-          INITRD_ARG=""
-          [ -f initrd.bin ] && INITRD_ARG="--initrd=initrd.bin"
-
-          # Rebuild UKI with correct --devicetree argument
-          python3 "$WORKSPACE/ukify.py" build \
+          # 5. Rebuild UKI with corrected --devicetree argument
+          mkdir -p uki_out
+          echo "$NEW_CMD" > uki_out/cmdline.txt
+          
+          python3 ./ukify.py build \
             --linux vmlinuz.bin \
-            $INITRD_ARG \
-            --cmdline "$OUTDIR/cmdline.txt" \
+            --initrd initrd.bin \
+            --cmdline uki_out/cmdline.txt \
             --devicetree "$DTB_SRC" \
-            --output "$OUTDIR/uki.efi"
+            --output uki_out/uki.efi
 
-          echo "UKI_OUT=$OUTDIR/uki.efi" >> "$GITHUB_ENV"
+          echo "UKI_OUT=$(pwd)/uki_out/uki.efi" >> "$GITHUB_ENV"
 
-      - name: Final artifact summary
-        shell: bash
-        env:
-          UKI_OUT: ${{ env.UKI_OUT }}
+      - name: Final Summary
         run: |
-          set -euo pipefail
-          ls -lh "$UKI_OUT"
-          echo "Build completed. Ready for flashing."
-
-      - name: Fix Workspace Ownership End
-        if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" "${{ github.workspace }}"
+          ls -lh ${{ env.UKI_OUT }}
+          echo "Build successful: ${{ env.UKI_OUT }}"
