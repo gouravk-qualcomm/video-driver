@@ -88,17 +88,6 @@ jobs:
           curl -fsSL -o "$WORKSPACE/ukify.py" "https://raw.githubusercontent.com/systemd/systemd/main/src/ukify/ukify.py"
           chmod +x "$WORKSPACE/ukify.py"
 
-      - name: Download iris artifacts from S3
-        shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$WORKSPACE/downloads/iris_test_app"
-          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/iris_test_app/" "$WORKSPACE/downloads/iris_test_app/" --recursive
-          aws s3 cp "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/artifacts/vpu20_1v.mbn" "$WORKSPACE/downloads/"
-          wget -q "https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz" -O "$WORKSPACE/downloads/video_clips_iris.tar.gz"
-
       - name: Download target meta tar from S3
         shell: bash
         env:
@@ -114,7 +103,7 @@ jobs:
           mkdir -p "$WORKSPACE/meta_dir/$MACHINE"
           tar -xf "$WORKSPACE/downloads/$META_TAR" -C "$WORKSPACE/meta_dir/$MACHINE"
 
-      - name: Locate boot artifacts
+      - name: Locate and Extract Kernel Components
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
@@ -122,113 +111,94 @@ jobs:
         run: |
           set -euo pipefail
 
-          EFI_BIN="$(find "$WORKSPACE" -type f \( -name 'efi.bin' -o -name '*.efi' -o -name 'Image.efi' \) | head -n 1 || true)"
-          DTB_SRC="$(find "$WORKSPACE" -type f \( -name '*.dtb' \) | head -n 1 || true)"
-          CMDLINE_SRC="$(find "$WORKSPACE" -type f \( -name 'cmdline.txt' -o -name '*cmdline*' \) | head -n 1 || true)"
+          # 1. Locate artifacts
+          EFI_BIN="$(find "$WORKSPACE/meta_dir/$MACHINE" -type f \( -name 'efi.bin' -o -name '*.efi' \) | head -n 1)"
+          DTB_SRC="$(find "$WORKSPACE" -type f -name '*.dtb' | head -n 1)"
+          
+          # 2. Extract Kernel (.linux) and Initrd (.initrd) from the existing UKI
+          # This ensures we have the raw components to rebuild correctly.
+          python3 - <<EOF
+          import pefile
+          import os
+          efi_path = "$EFI_BIN"
+          if os.path.exists(efi_path):
+              pe = pefile.PE(efi_path)
+              for section in pe.sections:
+                  name = section.Name.decode().strip('\x00')
+                  if '.linux' in name:
+                      with open('vmlinuz.bin', 'wb') as f: f.write(section.get_data())
+                  if '.initrd' in name:
+                      with open('initrd.bin', 'wb') as f: f.write(section.get_data())
+          EOF
+
+          # 3. Fix 64K Alignment (Prevents FIRMWARE BUG)
+          if [ -f vmlinuz.bin ]; then
+            truncate -s %65536 vmlinuz.bin
+          fi
 
           echo "EFI_BIN=$EFI_BIN" >> "$GITHUB_ENV"
           echo "DTB_SRC=$DTB_SRC" >> "$GITHUB_ENV"
-          echo "CMDLINE_SRC=$CMDLINE_SRC" >> "$GITHUB_ENV"
 
-          echo "Located EFI_BIN=$EFI_BIN"
-          echo "Located DTB_SRC=$DTB_SRC"
-          echo "Located CMDLINE_SRC=$CMDLINE_SRC"
-
-      - name: Patch kernel cmdline for platform boot fixes
-        shell: bash
-        env:
-          MACHINE: ${{ matrix.machine }}
-          WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-
-          CLEAN_CMD="rootwait clk_ignore_unused pd_ignore_unused regulator_ignore_unused"
-          EXTRA_CMD="fw_devlink=off"
-
-          case "$MACHINE" in
-            *qcs9100*|*lemans*)
-              NEW_CMD="$CLEAN_CMD rootdelay=10 $EXTRA_CMD"
-              ;;
-            *qcs8300*|*monaco*)
-              NEW_CMD="$CLEAN_CMD"
-              ;;
-            *)
-              NEW_CMD="$CLEAN_CMD"
-              ;;
-          esac
-
-          echo "NEW_CMD=$NEW_CMD" >> "$GITHUB_ENV"
-          echo "Updated cmdline: $NEW_CMD"
-
-      - name: Patch QCS9100 DTB
+      - name: Patch QCS9100 DTB (Disable Stalling I2C)
         if: contains(matrix.machine, 'qcs9100') || contains(matrix.machine, 'lemans')
         shell: bash
         env:
           DTB_SRC: ${{ env.DTB_SRC }}
         run: |
           set -euo pipefail
-          [ -n "$DTB_SRC" ] || { echo "DTB_SRC not found"; exit 1; }
+          # Disable nodes causing "sync_state() pending"
+          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@a90000" "status" "disabled" 2>/dev/null || true
+          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@890000" "status" "disabled" 2>/dev/null || true
+          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000" "status" "disabled" 2>/dev/null || true
+          echo "QCS9100 DTB patched: I2C disabled"
 
-          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000/i2c@a90000" "status" "okay" 2>/dev/null || true
-          fdtput -t s "$DTB_SRC" "/soc@0/geniqup@ac0000" "status" "okay" 2>/dev/null || true
-
-          echo "QCS9100 DTB patched"
-
-      - name: Patch QCS8300 regulators
+      - name: Patch QCS8300 Regulators (Force Always-On)
         if: contains(matrix.machine, 'qcs8300') || contains(matrix.machine, 'monaco')
         shell: bash
         env:
           DTB_SRC: ${{ env.DTB_SRC }}
         run: |
           set -euo pipefail
-          [ -n "$DTB_SRC" ] || { echo "DTB_SRC not found"; exit 1; }
-
-          for node in \
-            "/soc@0/vreg_conn_lp05" \
-            "/soc@0/vreg_conn_lp35" \
-            "/soc@0/vreg_conn_lp95"
-          do
-            fdtput -t s "$DTB_SRC" "$node" "status" "okay" 2>/dev/null || true
-            fdtput -t s "$DTB_SRC" "$node" "regulator-always-on" "1" 2>/dev/null || true
-            fdtput -t s "$DTB_SRC" "$node" "regulator-boot-on" "1" 2>/dev/null || true
+          # Correct paths for Monaco RPMH regulators
+          REG_BASE="/soc@0/qcom,rpmh-regulators/regulators"
+          for node in "conn-lp05" "conn-lp35" "conn-lp95"; do
+            fdtput -t s "$DTB_SRC" "$REG_BASE/$node" "regulator-always-on" "" 2>/dev/null || true
+            fdtput -t s "$DTB_SRC" "$REG_BASE/$node" "regulator-boot-on" "" 2>/dev/null || true
           done
-
           fdtput -t s "$DTB_SRC" "/soc@0/wcn6855-pmu" "status" "disabled" 2>/dev/null || true
-
-          echo "QCS8300 regulator nodes patched"
+          echo "QCS8300 DTB patched: Regulators forced on"
 
       - name: Build updated UKI
         shell: bash
         env:
           WORKSPACE: ${{ github.workspace }}
-          EFI_BIN: ${{ env.EFI_BIN }}
           DTB_SRC: ${{ env.DTB_SRC }}
-          NEW_CMD: ${{ env.NEW_CMD }}
+          MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
 
-          [ -n "$EFI_BIN" ] || { echo "EFI_BIN not found"; exit 1; }
+          # Set Command Line
+          CMDLINE="rootwait clk_ignore_unused pd_ignore_unused regulator_ignore_unused"
+          if [[ "$MACHINE" == *"qcs9100"* ]]; then
+            CMDLINE="$CMDLINE rootdelay=10 fw_devlink=off"
+          fi
 
           OUTDIR="$WORKSPACE/uki_out"
           mkdir -p "$OUTDIR"
+          echo "$CMDLINE" > "$OUTDIR/cmdline.txt"
 
-          CMDLINE_FILE="$OUTDIR/cmdline.txt"
-          printf '%s\n' "$NEW_CMD" > "$CMDLINE_FILE"
+          # Prepare arguments
+          INITRD_ARG=""
+          [ -f initrd.bin ] && INITRD_ARG="--initrd=initrd.bin"
 
-          if [ -n "${DTB_SRC:-}" ] && [ -f "$DTB_SRC" ]; then
-            cp "$DTB_SRC" "$OUTDIR/patched.dtb"
-            DTB_ARG="--dtb=$OUTDIR/patched.dtb"
-          else
-            DTB_ARG=""
-          fi
-
+          # Rebuild UKI with correct --devicetree argument
           python3 "$WORKSPACE/ukify.py" build \
-            --linux "$EFI_BIN" \
-            --cmdline "$CMDLINE_FILE" \
-            $DTB_ARG \
+            --linux vmlinuz.bin \
+            $INITRD_ARG \
+            --cmdline "$OUTDIR/cmdline.txt" \
+            --devicetree "$DTB_SRC" \
             --output "$OUTDIR/uki.efi"
 
-          ls -lh "$OUTDIR"
           echo "UKI_OUT=$OUTDIR/uki.efi" >> "$GITHUB_ENV"
 
       - name: Final artifact summary
@@ -237,15 +207,9 @@ jobs:
           UKI_OUT: ${{ env.UKI_OUT }}
         run: |
           set -euo pipefail
-          [ -f "$UKI_OUT" ] || { echo "UKI output missing"; exit 1; }
           ls -lh "$UKI_OUT"
-          echo "Build completed successfully"
+          echo "Build completed. Ready for flashing."
 
       - name: Fix Workspace Ownership End
         if: always()
-        shell: bash
-        env:
-          WORKSPACE: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          sudo chown -R "$(id -u):$(id -g)" "$WORKSPACE"
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ github.workspace }}"
