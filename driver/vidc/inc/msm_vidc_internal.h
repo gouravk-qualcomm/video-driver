@@ -501,6 +501,11 @@ enum msm_vidc_domain_type {
 	MSM_VIDC_DECODER           = BIT(1),
 };
 
+enum msm_vidc_vcodec_core_id {
+	MSM_VIDC_VCODEC0 = 1,
+	MSM_VIDC_VCODEC1,
+};
+
 enum msm_vidc_codec_type {
 	MSM_VIDC_H264              = BIT(0),
 	MSM_VIDC_HEVC              = BIT(1),
