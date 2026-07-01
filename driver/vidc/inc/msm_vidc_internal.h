@@ -563,7 +563,8 @@ enum msm_vidc_buffer_region {
 	MSM_VIDC_SECURE_NONPIXEL                = BIT(4),
 	MSM_VIDC_SECURE_BITSTREAM               = BIT(5),
 	MSM_VIDC_SECURE_PIXEL                   = BIT(6),
-	MSM_VIDC_REGION_MAX                     = BIT(7),
+	MSM_VIDC_SECURE_FIRMWARE                = BIT(7),
+	MSM_VIDC_REGION_MAX                     = BIT(8),
 };
 
 enum msm_vidc_device_region FOREACH_DEVICE_REGION(GENERATE_MSM_VIDC_ENUM);

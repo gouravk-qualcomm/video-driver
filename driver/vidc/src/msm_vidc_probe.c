@@ -80,7 +80,8 @@ static inline bool is_video_context_bank_device_node(struct device_node *of_node
 		of_device_is_compatible(of_node, "qcom,vidc,cb-sec-non-pxl") ||
 		of_device_is_compatible(of_node, "qcom,vidc,cb-ns") ||
 		of_device_is_compatible(of_node, "qcom,vidc,cb-ns-bitstream") ||
-		of_device_is_compatible(of_node, "qcom,vidc,cb-ns-pxl"));
+		of_device_is_compatible(of_node, "qcom,vidc,cb-ns-pxl") ||
+		of_device_is_compatible(of_node, "qcom,vidc,cb-firmware"));
 }
 
 static inline bool is_video_context_bank_device(struct device *dev)
