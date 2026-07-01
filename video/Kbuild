@@ -59,6 +59,10 @@ include $(VIDEO_ROOT)/config/nordau_video.conf
 LINUXINCLUDE   += -include $(VIDEO_ROOT)/config/nordau_video.h
 endif
 
+else ifeq ($(CONFIG_ARCH_GLYMUR), y)
+include $(VIDEO_ROOT)/config/glymur_video.conf
+LINUXINCLUDE   += -include $(VIDEO_ROOT)/config/glymur_video.h
+
 else ifeq ($(CONFIG_QLI_VIDC_SA8775P), y)
 include $(VIDEO_ROOT)/config/lemans_video.conf
 LINUXINCLUDE   += -include $(VIDEO_ROOT)/config/lemans_video.h
@@ -115,6 +119,11 @@ LINUXINCLUDE   += -I$(VIDEO_DRIVER_ABS_PATH)/platform/nordau/inc \
                   -I$(VIDEO_DRIVER_ABS_PATH)/variant/iris36/inc
 endif
 
+ifeq ($(CONFIG_MSM_VIDC_GLYMUR), y)
+LINUXINCLUDE   += -I$(VIDEO_DRIVER_ABS_PATH)/platform/glymur/inc \
+                  -I$(VIDEO_DRIVER_ABS_PATH)/variant/iris36/inc
+endif
+
 ifeq ($(CONFIG_MSM_VIDC_HAMOA), y)
 LINUXINCLUDE   += -I$(VIDEO_DRIVER_ABS_PATH)/platform/hamoa/inc \
                   -I$(VIDEO_DRIVER_ABS_PATH)/variant/iris3/inc
@@ -128,7 +137,9 @@ LINUXINCLUDE   += -I$(VIDEO_DRIVER_ABS_PATH)/platform/lemans/inc \
                   -I$(VIDEO_DRIVER_ABS_PATH)/platform/kodiak/inc \
                   -I$(VIDEO_DRIVER_ABS_PATH)/platform/purwa/inc \
                   -I$(VIDEO_DRIVER_ABS_PATH)/variant/iris3/inc \
-                  -I$(VIDEO_DRIVER_ABS_PATH)/variant/iris2/inc
+                  -I$(VIDEO_DRIVER_ABS_PATH)/variant/iris2/inc \
+                  -I$(VIDEO_DRIVER_ABS_PATH)/platform/glymur/inc \
+                  -I$(VIDEO_DRIVER_ABS_PATH)/variant/iris36/inc
 endif
 
 LINUXINCLUDE   += -I$(VIDEO_DRIVER_ABS_PATH)/platform/common/inc \
@@ -211,6 +222,15 @@ iris_vpu-objs +=  $(VIDEO_DRIVER_REL_PATH)/platform/nordau/src/nordau.o \
                   $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_iris36.o
 endif
 
+ifeq ($(CONFIG_MSM_VIDC_GLYMUR), y)
+iris_vpu-objs +=  $(VIDEO_DRIVER_REL_PATH)/platform/glymur/src/glymur.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_buffer_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_power_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_bus_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_clock_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_iris36.o
+endif
+
 ifeq ($(CONFIG_MSM_VIDC_HAMOA), y)
 iris_vpu-objs +=  $(VIDEO_DRIVER_REL_PATH)/platform/hamoa/src/hamoa.o \
                   $(VIDEO_DRIVER_REL_PATH)/variant/iris3/src/msm_vidc_buffer_iris3.o \
@@ -233,7 +253,13 @@ iris_vpu-objs +=  $(VIDEO_DRIVER_REL_PATH)/platform/lemans/src/lemans.o \
                   $(VIDEO_DRIVER_REL_PATH)/variant/iris3/src/msm_vidc_iris3.o \
                   $(VIDEO_DRIVER_REL_PATH)/variant/iris2/src/msm_vidc_buffer_iris2.o \
                   $(VIDEO_DRIVER_REL_PATH)/variant/iris2/src/msm_vidc_power_iris2.o \
-                  $(VIDEO_DRIVER_REL_PATH)/variant/iris2/src/msm_vidc_iris2.o
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris2/src/msm_vidc_iris2.o \
+                  $(VIDEO_DRIVER_REL_PATH)/platform/glymur/src/glymur.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_buffer_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_power_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_bus_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_clock_iris36.o \
+                  $(VIDEO_DRIVER_REL_PATH)/variant/iris36/src/msm_vidc_iris36.o
 endif
 
 iris_vpu-objs +=  $(VIDEO_DRIVER_REL_PATH)/platform/common/src/msm_vidc_platform.o \
