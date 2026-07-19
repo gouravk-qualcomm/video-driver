@@ -3,8 +3,10 @@
  * Copyright (c) Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#ifdef MSM_VIDC_HAS_GLYMUR_GCC_VIDEOCC
 #include <dt-bindings/clock/qcom,glymur-gcc.h>
 #include <dt-bindings/clock/qcom,glymur-videocc.h>
+#endif
 #include <media/v4l2_vidc_extensions.h>
 
 #include "msm_vidc_internal.h"
@@ -1855,6 +1857,7 @@ static const char * const glymur_opp_pd_table[] = {
 
 /* name, clock id, scaling */
 static const struct clk_table glymur_clk_table[] = {
+#ifdef MSM_VIDC_HAS_GLYMUR_GCC_VIDEOCC
 	{ "core_iface",           GCC_VIDEO_AXI0C_CLK,        0 },
 	{ "core",                 VIDEO_CC_MVS0C_CLK,         0 },
 	{ "vcodec0_core",         VIDEO_CC_MVS0_CLK,          1,
@@ -1866,6 +1869,7 @@ static const struct clk_table glymur_clk_table[] = {
 	{ "vcodec1_core",         VIDEO_CC_MVS1_CLK,          1,
 		(u64[]) {655000000, 533333334, 444000000, 366000000, 338000000, 240000000}, 6},
 	{ "vcodec1_core_freerun", VIDEO_CC_MVS1_FREERUN_CLK,  0 },
+#endif
 };
 
 const char * const glymur_opp_clk_table[] = {

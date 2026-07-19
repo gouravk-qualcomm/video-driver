@@ -180,7 +180,9 @@ static const struct of_device_id msm_vidc_dt_match[] = {
 	{.compatible = "qcom,sa8775p-iris"},
 	{.compatible = "qcom,qcs8300-iris"},
 	{.compatible = "qcom,sc7280-venus"},
+#ifdef MSM_VIDC_HAS_GLYMUR_GCC_VIDEOCC
 	{.compatible = "qcom,glymur-iris"},
+#endif
 	{.compatible = "qcom,vidc,cb-ns-pxl"},
 	{.compatible = "qcom,vidc,cb-ns"},
 	{.compatible = "qcom,vidc,cb-ns-bitstream"},

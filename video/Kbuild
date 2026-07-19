@@ -19,6 +19,15 @@ ifeq ($(HAS_X1P42100_VIDEOCC),yes)
   ccflags-y += -DMSM_VIDC_HAS_X1P42100_VIDEOCC=1
 endif
 
+GLYMUR_GCC_VIDEOCC_H := $(shell \
+	test -f $(KERNEL_SRC)/include/dt-bindings/clock/qcom,glymur-videocc.h && \
+	test -f $(KERNEL_SRC)/include/dt-bindings/clock/qcom,glymur-gcc.h && \
+	echo yes || echo no)
+
+ifeq ($(GLYMUR_GCC_VIDEOCC_H),yes)
+  ccflags-y += -DMSM_VIDC_HAS_GLYMUR_GCC_VIDEOCC=1
+endif
+
 MDT_LOADER_H := $(KERNEL_SRC)/include/linux/soc/qcom/mdt_loader.h
 
 HAS_MDT_PAS_LOAD := $(shell grep -qs 'qcom_mdt_pas_load' $(MDT_LOADER_H) && echo yes || echo no)
