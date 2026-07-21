@@ -1960,9 +1960,10 @@ static int msm_vidc_purwa_init_cb_devs(struct msm_vidc_core *core)
 	static const struct {
 		const char *cb_name;
 		u32 fid;
+		const char *cb_node_name;
 	} purwa_cb_fid[] = {
-		{ "qcom,vidc,cb-ns",     0 },
-		{ "qcom,vidc,cb-ns-pxl", 1 },
+		{ "qcom,vidc,cb-ns",     0, "non-pixel" },
+		{ "qcom,vidc,cb-ns-pxl", 1, "pixel"     },
 	};
 	struct context_bank_info *cb;
 	int i, rc;
@@ -1972,8 +1973,8 @@ static int msm_vidc_purwa_init_cb_devs(struct msm_vidc_core *core)
 			if (strcmp(cb->name, purwa_cb_fid[i].cb_name))
 				continue;
 
-			rc = msm_vidc_create_child_device_and_map(core, cb,
-								  purwa_cb_fid[i].fid);
+			rc = msm_vidc_create_child_device_and_map(core, cb, purwa_cb_fid[i].fid,
+								  purwa_cb_fid[i].cb_node_name);
 			if (rc) {
 				d_vpr_e("%s: failed to create child device for %s rc %d\n",
 					__func__, cb->name, rc);
