@@ -34,7 +34,66 @@ enum tzbsp_video_state {
 	TZBSP_VIDEO_STATE_RESTORE_THRESHOLD = 2,
 };
 
-#if defined(HAVE_QCOM_MDT_LOAD)
+#if defined(HAVE_QCOM_TEE_PAS)
+#include <linux/firmware/qcom/qcom_pas.h>
+static int fw_pas_load(struct msm_vidc_core *core,
+			const struct firmware *firmware,
+			const char *fw_name,
+			phys_addr_t phys, size_t res_size)
+{
+	struct device *dev = core->fw.dev ?: &core->pdev->dev;
+	int pas_id = core->platform->data.pas_id;
+	struct qcom_pas_context *ctx;
+	int rc = 0;
+
+	ctx = devm_qcom_pas_context_alloc(dev, pas_id, phys, res_size);
+	if (!ctx) {
+		d_vpr_e("%s: failed to initialize PAS context\n", __func__);
+		return -ENOMEM;
+	}
+
+	ctx->use_tzmem = core->fw.dev;
+	rc = qcom_mdt_pas_load(ctx, firmware, fw_name, NULL);
+	if (rc) {
+		d_vpr_e("%s: error %d pas-load fw \"%s\"\n", __func__, rc, fw_name);
+		goto metadata_release;
+	}
+
+	if (core->fw.iommu_domain) {
+		rc = iommu_map(core->fw.iommu_domain, 0, phys, res_size,
+				IOMMU_READ | IOMMU_WRITE | IOMMU_PRIV, GFP_KERNEL);
+		if (rc) {
+			d_vpr_e("%s: iommu_map failed rc=%d\n", __func__, rc);
+			goto metadata_release;
+		}
+	}
+
+	rc = qcom_pas_prepare_and_auth_reset(ctx);
+	if (rc) {
+		d_vpr_e("%s: auth+reset failed rc=%d fw \"%s\"\n", __func__, rc, fw_name);
+		goto err_iommu_unmap;
+	}
+
+	qcom_pas_metadata_release(ctx);
+	core->fw.ctx = ctx;
+	return 0;
+
+err_iommu_unmap:
+	if (core->fw.iommu_domain)
+		iommu_unmap(core->fw.iommu_domain, 0, res_size);
+metadata_release:
+	qcom_pas_metadata_release(ctx);
+	return rc;
+}
+
+static inline void fw_pas_cleanup(struct msm_vidc_core *core)
+{
+	if (core->fw.iommu_domain && core->fw.ctx)
+		iommu_unmap(core->fw.iommu_domain, 0, core->fw.ctx->mem_size);
+	core->fw.ctx = NULL;
+}
+
+#elif defined(HAVE_QCOM_MDT_LOAD)
 static int fw_pas_load(struct msm_vidc_core *core,
 			const struct firmware *firmware,
 			const char *fw_name,
@@ -205,6 +264,28 @@ static inline void fw_pas_cleanup(struct msm_vidc_core *core)
 
 #endif
 
+#if defined(HAVE_QCOM_TEE_PAS)
+static inline int fw_pas_shutdown(int pas_id)
+{
+	return qcom_pas_shutdown(pas_id);
+}
+
+static inline int fw_pas_set_remote_state(bool resume, int pas_id)
+{
+	return qcom_pas_set_remote_state(resume, pas_id);
+}
+#else
+static inline int fw_pas_shutdown(int pas_id)
+{
+	return qcom_scm_pas_shutdown(pas_id);
+}
+
+static inline int fw_pas_set_remote_state(bool resume, int pas_id)
+{
+	return qcom_scm_set_remote_state(resume, pas_id);
+}
+#endif
+
 static int __load_fw_to_memory(struct platform_device *pdev,
 			const char *firmware_name)
 {
@@ -323,7 +404,7 @@ int fw_load(struct msm_vidc_core *core)
 
 fail_scm_mem_protect:
 	if (core->resource->fw_cookie)
-		qcom_scm_pas_shutdown(core->resource->fw_cookie);
+		fw_pas_shutdown(core->resource->fw_cookie);
 	fw_pas_cleanup(core);
 	core->resource->fw_cookie = 0;
 	return rc;
@@ -337,7 +418,7 @@ int fw_unload(struct msm_vidc_core *core)
 		return -EINVAL;
 
 	d_vpr_h("%s: unloading video firmware\n", __func__);
-	ret = qcom_scm_pas_shutdown(core->resource->fw_cookie);
+	ret = fw_pas_shutdown(core->resource->fw_cookie);
 	fw_pas_cleanup(core);
 	if (ret)
 		d_vpr_e("Firmware unload failed rc=%d\n", ret);
@@ -349,12 +430,14 @@ int fw_unload(struct msm_vidc_core *core)
 
 int fw_suspend(struct msm_vidc_core *core)
 {
-	return qcom_scm_set_remote_state(TZBSP_VIDEO_STATE_SUSPEND, 0);
+	return fw_pas_set_remote_state(TZBSP_VIDEO_STATE_SUSPEND,
+					core->platform->data.pas_id);
 }
 
 int fw_resume(struct msm_vidc_core *core)
 {
-	return qcom_scm_set_remote_state(TZBSP_VIDEO_STATE_RESUME, 0);
+	return fw_pas_set_remote_state(TZBSP_VIDEO_STATE_RESUME,
+					core->platform->data.pas_id);
 }
 
 int fw_init(struct msm_vidc_core *core)
