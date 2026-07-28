@@ -20,11 +20,15 @@ ifeq ($(HAS_X1P42100_VIDEOCC),yes)
 endif
 
 MDT_LOADER_H := $(KERNEL_SRC)/include/linux/soc/qcom/mdt_loader.h
+QCOM_PAS_H := $(KERNEL_SRC)/include/linux/firmware/qcom/qcom_pas.h
 
 HAS_MDT_PAS_LOAD := $(shell grep -qs 'qcom_mdt_pas_load' $(MDT_LOADER_H) && echo yes || echo no)
 HAS_MDT_PAS_LOAD_MEM := $(shell grep -qs 'mem_region.*reloc_base' $(MDT_LOADER_H) && echo yes || echo no)
+HAS_QCOM_TEE_PAS := $(shell test -f $(QCOM_PAS_H) && echo yes || echo no)
 
-ifeq ($(HAS_MDT_PAS_LOAD),no)
+ifeq ($(HAS_QCOM_TEE_PAS),yes)
+  ccflags-y += -DHAVE_QCOM_TEE_PAS
+else ifeq ($(HAS_MDT_PAS_LOAD),no)
   ccflags-y += -DHAVE_QCOM_MDT_LOAD
 else ifeq ($(HAS_MDT_PAS_LOAD_MEM),yes)
   ccflags-y += -DHAVE_QCOM_MDT_PAS_LOAD_MEM
