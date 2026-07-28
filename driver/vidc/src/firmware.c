@@ -396,6 +396,19 @@ int fw_load(struct msm_vidc_core *core)
 
 	rc = call_venus_op(core, scm_mem_protect, core);
 	if (rc) {
+#if defined(HAVE_QCOM_TEE_PAS)
+		/*
+		 * When PAS is backed by OP-TEE, secure memory protection is
+		 * owned by the TEE and this SCM call is not serviced, so its
+		 * failure is expected. Only treat it as fatal when OP-TEE is
+		 * not on the bus.
+		 */
+		if (qcom_pas_is_tee_backed()) {
+			d_vpr_h("%s: scm_mem_protect failed %d; OP-TEE PAS in use, ignoring\n",
+				__func__, rc);
+			return 0;
+		}
+#endif
 		d_vpr_e("%s scm_mem_protect failed\n", __func__);
 		goto fail_scm_mem_protect;
 	}
